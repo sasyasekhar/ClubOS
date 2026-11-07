@@ -36,3 +36,22 @@ class MembershipStatus(str, Enum):
     ACTIVE = "ACTIVE"
     DECLINED = "DECLINED"
     ENDED = "ENDED"
+
+class ActivityRevisionStatus(str, Enum):
+    DRAFT = "DRAFT"
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    CHANGES_REQUESTED = "CHANGES_REQUESTED"
+
+
+class ActivityReviewDecision(str, Enum):
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    CHANGES_REQUESTED = "CHANGES_REQUESTED"
+
+
+class ReviewMode(str, Enum):
+    DIRECT = "DIRECT"
+    IMPERSONATION = "IMPERSONATION"
+    
