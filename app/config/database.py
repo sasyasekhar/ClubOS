@@ -1,10 +1,10 @@
 from sqlalchemy import create_engine, URL
-from sqlalchemy.orm import sessionmaker, DeclarativeBase
+from sqlalchemy.orm import sessionmaker
 
 from app.config.settings import settings
+from app.models.base import Base
 
 
-# Build the PostgreSQL connection URL
 database_url = URL.create(
     drivername="postgresql+psycopg",
     username=settings.DB_USER,
@@ -14,15 +14,11 @@ database_url = URL.create(
     database=settings.DB_NAME,
 )
 
-
-# Create the database engine
 engine = create_engine(
     database_url,
     pool_pre_ping=True,
 )
 
-
-# Create database sessions
 SessionLocal = sessionmaker(
     bind=engine,
     autoflush=False,
@@ -30,12 +26,6 @@ SessionLocal = sessionmaker(
 )
 
 
-# Base class for all database models
-class Base(DeclarativeBase):
-    pass
-
-
-# Database dependency for FastAPI routes
 def get_db():
     db = SessionLocal()
 
@@ -43,4 +33,3 @@ def get_db():
         yield db
     finally:
         db.close()
-        
