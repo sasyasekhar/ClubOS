@@ -13,3 +13,10 @@ from app.models.activity import Activity
 from app.models.activity_revision import ActivityRevision
 from app.models.activity_attachment import ActivityAttachment
 from app.models.activity_review import ActivityReview
+
+from app.models.login_history import LoginHistory
+from app.models.impersonation_session import ImpersonationSession
+from app.models.audit_log import AuditLog
+from app.models.deleted_record import DeletedRecord
+
+

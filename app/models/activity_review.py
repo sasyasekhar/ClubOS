@@ -10,7 +10,7 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column
-
+ 
 from app.models.base import Base
 from app.models.enums import ActivityReviewDecision, ReviewMode
 
@@ -82,4 +82,3 @@ class ActivityReview(Base):
         server_default=func.now(),
         nullable=False,
     )
-    

@@ -54,4 +54,19 @@ class ActivityReviewDecision(str, Enum):
 class ReviewMode(str, Enum):
     DIRECT = "DIRECT"
     IMPERSONATION = "IMPERSONATION"
-    
+
+class LoginOutcome(str, Enum):
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
+
+
+class ImpersonationStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    ENDED = "ENDED"
+    EXPIRED = "EXPIRED"
+
+
+class DeletionStatus(str, Enum):
+    PENDING = "PENDING"
+    RESTORED = "RESTORED"
+    PERMANENTLY_DELETED = "PERMANENTLY_DELETED"
