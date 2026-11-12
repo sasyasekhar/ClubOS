@@ -1,6 +1,8 @@
 import uuid
 
 from sqlalchemy import (
+    UUID,
+    ForeignKey,
     String,
     Text,
     DateTime,
@@ -17,35 +19,23 @@ from app.models.enums import ClubReviewDecision
 class ClubReview(Base):
     __tablename__ = "club_reviews"
 
-    __table_args__ = (
-        ForeignKeyConstraint(
-            ["school_id", "club_id"],
-            ["clubs.school_id", "clubs.id"],
-            name="fk_club_review_same_school",
-        ),
-
-        ForeignKeyConstraint(
-            ["school_id", "admin_account_id"],
-            ["school_admins.school_id", "school_admins.account_id"],
-            name="fk_club_review_school_admin",
-        ),
-    )
+    __table_args__ = ()
 
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True,
         default=uuid.uuid4,
     )
 
-    school_id: Mapped[uuid.UUID] = mapped_column(
-        nullable=False,
+    club_id = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("clubs.id"),
+        nullable=False
     )
 
-    club_id: Mapped[uuid.UUID] = mapped_column(
-        nullable=False,
-    )
-
-    admin_account_id: Mapped[uuid.UUID] = mapped_column(
-        nullable=False,
+    admin_account_id = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("school_admins.account_id"),
+        nullable=False
     )
 
     decision: Mapped[ClubReviewDecision] = mapped_column(

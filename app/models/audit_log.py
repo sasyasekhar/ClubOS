@@ -11,6 +11,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
+from sqlalchemy.dialects.postgresql import JSONB
 
 
 class AuditLog(Base):
@@ -63,8 +64,8 @@ class AuditLog(Base):
         nullable=True,
     )
 
-    details: Mapped[str | None] = mapped_column(
-        Text,
+    details: Mapped[dict | None] = mapped_column(
+        JSONB,
         nullable=True,
     )
 

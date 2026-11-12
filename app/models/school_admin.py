@@ -27,19 +27,9 @@ class SchoolAdmin(Base):
             name="uq_school_admin_school_account"
         ),
 
-        CheckConstraint(
-            "account_type = 'SCHOOL_ADMIN'",
-            name="ck_school_admin_account_type"
-        ),
-
         ForeignKeyConstraint(
-            ["school_id", "account_id", "account_type"],
-            [
-                "accounts.school_id",
-                "accounts.id",
-                "accounts.account_type"
-            ],
-            name="fk_school_admin_same_school_admin_type"
+            ["school_id", "account_id"],
+            [ "accounts.school_id", "accounts.id"], name="fk_school_admin_same_school"
         ),
     )
 
@@ -57,7 +47,5 @@ class SchoolAdmin(Base):
         server_default=func.now(),
         nullable=False,
     )
-    account_type: Mapped[AccountType] = mapped_column(
-    default=AccountType.SCHOOL_ADMIN,
-    nullable=False)
+
     

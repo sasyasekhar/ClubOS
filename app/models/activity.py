@@ -1,7 +1,9 @@
 import uuid
 
 from sqlalchemy import (
+    UUID,
     DateTime,
+    ForeignKey,
     ForeignKeyConstraint,
     func,
 )
@@ -13,37 +15,26 @@ from app.models.base import Base
 class Activity(Base):
     __tablename__ = "activities"
 
-    __table_args__ = (
-        ForeignKeyConstraint(
-            ["school_id", "club_id"],
-            ["clubs.school_id", "clubs.id"],
-            name="fk_activity_club_same_school",
-        ),
+    __table_args__ = ()
 
-        ForeignKeyConstraint(
-            ["school_id", "created_by"],
-            ["accounts.school_id", "accounts.id"],
-            name="fk_activity_creator_same_school",
-        ),
-    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True,
         default=uuid.uuid4,
     )
 
-    school_id: Mapped[uuid.UUID] = mapped_column(
-        nullable=False,
+
+    club_id = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("clubs.id"),
+        nullable=False
     )
 
-    club_id: Mapped[uuid.UUID] = mapped_column(
-        nullable=False,
+    created_by = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("accounts.id"),
+        nullable=False
     )
-
-    created_by: Mapped[uuid.UUID] = mapped_column(
-        nullable=False,
-    )
-
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

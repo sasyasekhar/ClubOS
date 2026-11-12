@@ -1,6 +1,7 @@
 import uuid
 
 from sqlalchemy import (
+    ForeignKeyConstraint,
     String,
     Text,
     DateTime,
@@ -24,14 +25,30 @@ class ActivityReview(Base):
             (
                 review_mode = 'DIRECT'
                 AND represented_account_id IS NULL
+                AND impersonation_session_id IS NULL
             )
             OR
             (
                 review_mode = 'IMPERSONATION'
                 AND represented_account_id IS NOT NULL
+                AND impersonation_session_id IS NOT NULL
             )
             """,
             name="ck_activity_review_impersonation",
+        ),
+        
+        ForeignKeyConstraint(
+            [
+                "impersonation_session_id",
+                "actor_account_id",
+                "represented_account_id",
+            ],
+            [
+                "impersonation_sessions.id",
+                "impersonation_sessions.admin_account_id",
+                "impersonation_sessions.target_account_id",
+            ],
+            name="fk_review_impersonation_session",
         ),
     )
 
@@ -81,4 +98,9 @@ class ActivityReview(Base):
         DateTime(timezone=True),
         server_default=func.now(),
         nullable=False,
+    )
+
+    impersonation_session_id: Mapped[uuid.UUID | None] = mapped_column(
+    nullable=True,
+    index=True,
     )

@@ -24,6 +24,7 @@ class ClubStatus(str, Enum):
 class ClubReviewDecision(str, Enum):
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
+    CHANGES_REQUESTED = "CHANGES_REQUESTED"
 
 
 class ClubRole(str, Enum):

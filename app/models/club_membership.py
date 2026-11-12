@@ -1,15 +1,17 @@
+
 import uuid
+from datetime import date, datetime
 
 from sqlalchemy import (
     Date,
     DateTime,
-    ForeignKeyConstraint,
-    UniqueConstraint,
+    ForeignKey,
     Index,
     Enum as SAEnum,
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -20,25 +22,6 @@ class ClubMembership(Base):
     __tablename__ = "club_memberships"
 
     __table_args__ = (
-        ForeignKeyConstraint(
-            ["school_id", "club_id"],
-            ["clubs.school_id", "clubs.id"],
-            name="fk_membership_club_same_school",
-        ),
-
-        ForeignKeyConstraint(
-            ["school_id", "account_id"],
-            ["accounts.school_id", "accounts.id"],
-            name="fk_membership_account_same_school",
-        ),
-
-        UniqueConstraint(
-            "club_id",
-            "account_id",
-            "role",
-            name="uq_club_account_role",
-        ),
-
         Index(
             "uq_one_current_representative_per_role",
             "club_id",
@@ -49,19 +32,20 @@ class ClubMembership(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
         primary_key=True,
         default=uuid.uuid4,
     )
 
-    school_id: Mapped[uuid.UUID] = mapped_column(
-        nullable=False,
-    )
-
     club_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("clubs.id"),
         nullable=False,
     )
 
     account_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("accounts.id"),
         nullable=False,
     )
 
@@ -76,19 +60,18 @@ class ClubMembership(Base):
         nullable=False,
     )
 
-    start_date: Mapped[Date] = mapped_column(
+    start_date: Mapped[date] = mapped_column(
         Date,
         nullable=False,
     )
 
-    end_date: Mapped[Date | None] = mapped_column(
+    end_date: Mapped[date | None] = mapped_column(
         Date,
         nullable=True,
     )
 
-    created_at: Mapped[DateTime] = mapped_column(
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
         nullable=False,
     )
-    

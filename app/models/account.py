@@ -22,9 +22,9 @@ class Account(Base):
 
     __table_args__ = (
         UniqueConstraint(
-            "school_id",
+             "school_id", 
             "id",
-            name="uq_accounts_school_id_id",
+            name="uq_accounts_school_id",
         ),
 
         CheckConstraint(

@@ -1,18 +1,18 @@
 """Create initial database schema
 
-Revision ID: d019a8644268
+Revision ID: 8da4c9ba362a
 Revises: 
-Create Date: 2026-11-10 15:13:18.662782
+Create Date: 2026-11-12 23:05:36.297288
 
 """
 from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
-
+from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = 'd019a8644268'
+revision: str = '8da4c9ba362a'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -58,7 +58,7 @@ def upgrade() -> None:
     sa.CheckConstraint("\n            (\n                account_type = 'PLATFORM_OWNER'\n                AND school_id IS NULL\n            )\n            OR\n            (\n                account_type != 'PLATFORM_OWNER'\n                AND school_id IS NOT NULL\n            )\n            ", name='ck_account_school_requirement'),
     sa.ForeignKeyConstraint(['school_id'], ['schools.id'], ),
     sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('school_id', 'id', name='uq_accounts_school_id_id')
+    sa.UniqueConstraint('school_id', 'id', name='uq_accounts_school_id')
     )
     op.create_index('uq_accounts_email_lower', 'accounts', [sa.literal_column('lower(email)')], unique=True)
     op.create_index('uq_accounts_username_lower', 'accounts', [sa.literal_column('lower(username)')], unique=True)
@@ -66,7 +66,7 @@ def upgrade() -> None:
     sa.Column('id', sa.Uuid(), nullable=False),
     sa.Column('school_id', sa.Uuid(), nullable=False),
     sa.Column('academic_year_id', sa.Uuid(), nullable=False),
-    sa.Column('created_by', sa.Uuid(), nullable=False),
+    sa.Column('created_by', sa.UUID(), nullable=False),
     sa.Column('name', sa.String(length=150), nullable=False),
     sa.Column('description', sa.Text(), nullable=True),
     sa.Column('category', sa.String(length=100), nullable=False),
@@ -74,12 +74,13 @@ def upgrade() -> None:
     sa.Column('status', sa.Enum('PENDING', 'ACTIVE', 'REJECTED', 'ARCHIVED', name='club_status'), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.Column('creator_account_type', sa.Enum('SCHOOL_ADMIN', 'STUDENT', 'TEACHER', 'PLATFORM_OWNER', name='accounttype'), nullable=False),
-    sa.CheckConstraint("creator_account_type = 'STUDENT'", name='ck_club_creator_is_student'),
-    sa.ForeignKeyConstraint(['school_id', 'created_by', 'creator_account_type'], ['accounts.school_id', 'accounts.id', 'accounts.account_type'], name='fk_club_creator_same_school_student'),
+    sa.ForeignKeyConstraint(['academic_year_id'], ['academic_years.id'], ),
+    sa.ForeignKeyConstraint(['created_by'], ['accounts.id'], ),
+    sa.ForeignKeyConstraint(['school_id', 'academic_year_id'], ['academic_years.school_id', 'academic_years.id'], name='fk_club_academic_year_same_school'),
+    sa.ForeignKeyConstraint(['school_id', 'created_by'], ['accounts.school_id', 'accounts.id'], name='fk_club_creator_same_school'),
     sa.ForeignKeyConstraint(['school_id'], ['schools.id'], ),
     sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('school_id', 'id', name='uq_club_school_id')
+    sa.UniqueConstraint('school_id', 'id', name='uq_clubs_school_id_id')
     )
     op.create_table('deleted_records',
     sa.Column('id', sa.Uuid(), nullable=False),
@@ -105,7 +106,8 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['admin_account_id'], ['accounts.id'], ),
     sa.ForeignKeyConstraint(['target_account_id'], ['accounts.id'], ),
     sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('id', 'admin_account_id', name='uq_impersonation_id_admin')
+    sa.UniqueConstraint('id', 'admin_account_id', 'target_account_id', name='uq_impersonation_session_id_admin_target'),
+    sa.UniqueConstraint('id', 'admin_account_id', name='uq_impersonation_session_id_admin')
     )
     op.create_index(op.f('ix_impersonation_sessions_admin_account_id'), 'impersonation_sessions', ['admin_account_id'], unique=False)
     op.create_index(op.f('ix_impersonation_sessions_target_account_id'), 'impersonation_sessions', ['target_account_id'], unique=False)
@@ -124,9 +126,7 @@ def upgrade() -> None:
     sa.Column('school_id', sa.Uuid(), nullable=False),
     sa.Column('account_id', sa.Uuid(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.Column('account_type', sa.Enum('SCHOOL_ADMIN', 'STUDENT', 'TEACHER', 'PLATFORM_OWNER', name='accounttype'), nullable=False),
-    sa.CheckConstraint("account_type = 'SCHOOL_ADMIN'", name='ck_school_admin_account_type'),
-    sa.ForeignKeyConstraint(['school_id', 'account_id', 'account_type'], ['accounts.school_id', 'accounts.id', 'accounts.account_type'], name='fk_school_admin_same_school_admin_type'),
+    sa.ForeignKeyConstraint(['school_id', 'account_id'], ['accounts.school_id', 'accounts.id'], name='fk_school_admin_same_school'),
     sa.ForeignKeyConstraint(['school_id'], ['schools.id'], ),
     sa.PrimaryKeyConstraint('school_id'),
     sa.UniqueConstraint('account_id', name='uq_school_admin_account'),
@@ -134,13 +134,12 @@ def upgrade() -> None:
     )
     op.create_table('activities',
     sa.Column('id', sa.Uuid(), nullable=False),
-    sa.Column('school_id', sa.Uuid(), nullable=False),
-    sa.Column('club_id', sa.Uuid(), nullable=False),
-    sa.Column('created_by', sa.Uuid(), nullable=False),
+    sa.Column('club_id', sa.UUID(), nullable=False),
+    sa.Column('created_by', sa.UUID(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.ForeignKeyConstraint(['school_id', 'club_id'], ['clubs.school_id', 'clubs.id'], name='fk_activity_club_same_school'),
-    sa.ForeignKeyConstraint(['school_id', 'created_by'], ['accounts.school_id', 'accounts.id'], name='fk_activity_creator_same_school'),
+    sa.ForeignKeyConstraint(['club_id'], ['clubs.id'], ),
+    sa.ForeignKeyConstraint(['created_by'], ['accounts.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_table('audit_logs',
@@ -151,7 +150,7 @@ def upgrade() -> None:
     sa.Column('action', sa.String(length=100), nullable=False),
     sa.Column('entity_type', sa.String(length=100), nullable=False),
     sa.Column('entity_id', sa.String(length=100), nullable=True),
-    sa.Column('details', sa.Text(), nullable=True),
+    sa.Column('details', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
     sa.Column('occurred_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.ForeignKeyConstraint(['actor_account_id'], ['accounts.id'], ),
     sa.ForeignKeyConstraint(['impersonation_session_id', 'actor_account_id'], ['impersonation_sessions.id', 'impersonation_sessions.admin_account_id'], name='fk_audit_impersonation_actor'),
@@ -162,28 +161,28 @@ def upgrade() -> None:
     op.create_index(op.f('ix_audit_logs_actor_account_id'), 'audit_logs', ['actor_account_id'], unique=False)
     op.create_index(op.f('ix_audit_logs_occurred_at'), 'audit_logs', ['occurred_at'], unique=False)
     op.create_table('club_memberships',
-    sa.Column('id', sa.Uuid(), nullable=False),
-    sa.Column('school_id', sa.Uuid(), nullable=False),
-    sa.Column('club_id', sa.Uuid(), nullable=False),
-    sa.Column('account_id', sa.Uuid(), nullable=False),
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('club_id', sa.UUID(), nullable=False),
+    sa.Column('account_id', sa.UUID(), nullable=False),
     sa.Column('role', sa.Enum('STUDENT_REP', 'TEACHER_REP', name='club_role'), nullable=False),
     sa.Column('status', sa.Enum('PENDING', 'ACTIVE', 'DECLINED', 'ENDED', name='membership_status'), nullable=False),
     sa.Column('start_date', sa.Date(), nullable=False),
     sa.Column('end_date', sa.Date(), nullable=True),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.ForeignKeyConstraint(['school_id', 'club_id'], ['clubs.school_id', 'clubs.id'], name='fk_membership_club_same_school'),
+    sa.ForeignKeyConstraint(['account_id'], ['accounts.id'], ),
+    sa.ForeignKeyConstraint(['club_id'], ['clubs.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index('uq_one_current_representative_per_role', 'club_memberships', ['club_id', 'role'], unique=True, postgresql_where=sa.text("status IN ('PENDING', 'ACTIVE')"))
     op.create_table('club_reviews',
     sa.Column('id', sa.Uuid(), nullable=False),
-    sa.Column('school_id', sa.Uuid(), nullable=False),
-    sa.Column('club_id', sa.Uuid(), nullable=False),
-    sa.Column('admin_account_id', sa.Uuid(), nullable=False),
-    sa.Column('decision', sa.Enum('APPROVED', 'REJECTED', name='club_review_decision'), nullable=False),
+    sa.Column('club_id', sa.UUID(), nullable=False),
+    sa.Column('admin_account_id', sa.UUID(), nullable=False),
+    sa.Column('decision', sa.Enum('APPROVED', 'REJECTED', 'CHANGES_REQUESTED', name='club_review_decision'), nullable=False),
     sa.Column('comments', sa.Text(), nullable=True),
     sa.Column('reviewed_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.ForeignKeyConstraint(['school_id', 'club_id'], ['clubs.school_id', 'clubs.id'], name='fk_club_review_same_school'),
+    sa.ForeignKeyConstraint(['admin_account_id'], ['school_admins.account_id'], ),
+    sa.ForeignKeyConstraint(['club_id'], ['clubs.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_table('activity_revisions',
