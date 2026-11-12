@@ -16,7 +16,7 @@ jobs:
         image: postgres:17
         env:
           POSTGRES_USER: clubos_user
-          POSTGRES_PASSWORD: clubos_ci_password
+          POSTGRES_PASSWORD: ci_test_password
           POSTGRES_DB: clubos
         ports:
           - 5432:5432
@@ -31,7 +31,7 @@ jobs:
       DB_PORT: 5432
       DB_NAME: clubos
       DB_USER: clubos_user
-      DB_PASSWORD: sasya1225
+      DB_PASSWORD: ci_test_password
 
     steps:
       - name: Checkout repository
@@ -47,10 +47,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Check Python syntax
-        run: |
-          python -m compileall -q app migrations
+      - name: Apply database migrations
+        run: alembic upgrade head
 
-      - name: Test database migrations
-        run: |
-          alembic upgrade head
+      - name: Run tests
+        run: pytest
