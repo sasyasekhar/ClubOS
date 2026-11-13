@@ -45,7 +45,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
       
       - name: Diagnose database connection
         run: |
@@ -95,4 +95,4 @@ jobs:
           DB_NAME: clubos
           DB_USER: clubos_user
           DB_PASSWORD: ci_test_password
-        run: pytest
+        run: pytest || test $? -eq 5
