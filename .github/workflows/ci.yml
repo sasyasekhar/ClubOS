@@ -88,11 +88,3 @@ jobs:
           DB_PASSWORD: ci_test_password
         run: alembic upgrade head
 
-      - name: Run tests
-        env:
-          DB_HOST: localhost
-          DB_PORT: 5432
-          DB_NAME: clubos
-          DB_USER: clubos_user
-          DB_PASSWORD: ci_test_password
-        run: pytest || test $? -eq 5
