@@ -11,6 +11,15 @@ from app.services.school_registration import (
     register_school,
     RegistrationConflict,
 )
+from app.schemas.auth import (
+    MemberRegistration,
+    MemberRegistrationResponse,
+)
+
+from app.services.member_registration import (
+    register_member,
+    SchoolNotAvailable,
+)
 
 router = APIRouter()
 
@@ -26,6 +35,30 @@ def create_school(
 ):
     try:
         return register_school(db, payload)
+    except RegistrationConflict:
+        raise HTTPException(
+            status_code=409,
+            detail="Registration could not be completed.",
+        )
+    
+@router.post(
+    "/register",
+    response_model=MemberRegistrationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_member(
+    payload: MemberRegistration,
+    db: Session = Depends(get_db),
+):
+    try:
+        return register_member(db, payload)
+
+    except SchoolNotAvailable:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or inactive School Code.",
+        )
+
     except RegistrationConflict:
         raise HTTPException(
             status_code=409,
