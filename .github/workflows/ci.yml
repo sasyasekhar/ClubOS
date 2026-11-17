@@ -87,4 +87,32 @@ jobs:
           DB_USER: clubos_user
           DB_PASSWORD: ci_test_password
         run: alembic upgrade head
+      
+      - name: Create test database
+        run: |
+          python - <<'PY'
+          import psycopg
+          from app.config.settings import settings
+
+          with psycopg.connect(
+              host=settings.DB_HOST,
+              port=settings.DB_PORT,
+              dbname=settings.DB_NAME,
+              user=settings.DB_USER,
+              password=settings.DB_PASSWORD,
+              autocommit=True,
+          ) as conn:
+              conn.execute("CREATE DATABASE clubos_test")
+          PY
+
+      - name: Apply test database migrations
+        env:
+          DB_NAME: clubos_test
+        run: alembic upgrade head
+
+      - name: Run automated tests
+        env:
+          DB_NAME: clubos_test
+        run: python -m pytest -v
+
 
