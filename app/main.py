@@ -21,14 +21,10 @@ app.mount(
     name="static",
 )
 
-# Application routers
-app.include_router(
-    auth.router,
-    prefix="/auth",
-    tags=["Authentication"],
-)
 
 
 @app.get("/health", tags=["System"])
 async def health_check():
     return {"status": "healthy"}
+
+app.include_router(auth.router, prefix="/auth", tags=["Authentication"])
