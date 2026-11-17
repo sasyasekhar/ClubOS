@@ -36,3 +36,23 @@ class MemberRegistrationResponse(BaseModel):
     account_id: UUID
     school_id: UUID
     account_type: AccountType
+
+
+class LoginRequest(BaseModel):
+    identifier: str = Field(min_length=1, max_length=255)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class AccountResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    school_id: UUID | None
+    username: str
+    full_name: str
+    account_type: AccountType
+
+
+class LoginResponse(BaseModel):
+    account: AccountResponse
+    tab_key: str

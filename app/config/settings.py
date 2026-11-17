@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     DB_NAME: str = "clubos"
     DB_USER: str = "clubos_user"
     DB_PASSWORD: str
+    COOKIE_SECURE: bool = False
 
     model_config = SettingsConfigDict(
         env_file=".env",
