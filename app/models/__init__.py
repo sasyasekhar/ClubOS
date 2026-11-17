@@ -18,5 +18,5 @@ from app.models.login_history import LoginHistory
 from app.models.impersonation_session import ImpersonationSession
 from app.models.audit_log import AuditLog
 from app.models.deleted_record import DeletedRecord
-
+from app.models.auth_session import AuthSession
 
