@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from app.routes import auth
+from app.routes import auth, clubs
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 
@@ -28,3 +28,4 @@ async def health_check():
     return {"status": "healthy"}
 
 app.include_router(auth.router, prefix="/auth", tags=["Authentication"])
+app.include_router(clubs.router)
