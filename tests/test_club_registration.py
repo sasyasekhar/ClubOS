@@ -729,3 +729,187 @@ def test_replacement_key_cannot_change_teacher(env):
 
     assert first.status_code == 201
     assert second.status_code == 409
+
+
+def approved_club_for_memberships(env):
+    club_id = club_for_admin(env)
+    response = review_request(env, club_id, "APPROVED")
+    assert response.status_code == 201, response.text
+    return club_id
+
+
+def current_membership(env, club_id, role):
+    return env["db"].scalar(
+        select(ClubMembership).where(
+            ClubMembership.club_id == uuid.UUID(club_id),
+            ClubMembership.role == role,
+            ClubMembership.status == MembershipStatus.ACTIVE,
+        )
+    )
+
+
+def end_membership(env, club_id, membership_id, key=None):
+    return env["client"].post(
+        f"/clubs/{club_id}/memberships/{membership_id}/end",
+        json={"reason": "Administrative representative change"},
+        headers={"Idempotency-Key": str(key or uuid.uuid4())},
+    )
+
+
+def rejoin_membership(env, club_id, membership_id, key=None):
+    return env["client"].post(
+        f"/clubs/{club_id}/memberships/{membership_id}/rejoin",
+        headers={"Idempotency-Key": str(key or uuid.uuid4())},
+    )
+
+
+def test_admin_ends_student_representative(env):
+    club_id = approved_club_for_memberships(env)
+    rep = current_membership(env, club_id, ClubRole.STUDENT_REP)
+
+    response = end_membership(env, club_id, rep.id)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "ENDED"
+
+    env["db"].refresh(rep)
+    assert rep.end_date is not None
+
+
+def test_student_cannot_end_representative(env):
+    club_id = approved_club_for_memberships(env)
+    rep = current_membership(env, club_id, ClubRole.STUDENT_REP)
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["student"]
+    )
+
+    assert end_membership(env, club_id, rep.id).status_code == 403
+
+
+def test_end_membership_is_idempotent(env):
+    club_id = approved_club_for_memberships(env)
+    rep = current_membership(env, club_id, ClubRole.STUDENT_REP)
+    key = uuid.uuid4()
+
+    first = end_membership(env, club_id, rep.id, key)
+    second = end_membership(env, club_id, rep.id, key)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json() == second.json()
+
+    count = env["db"].scalar(
+        select(func.count()).select_from(AuditLog).where(
+            AuditLog.action == "REPRESENTATIVE_ENDED",
+            AuditLog.entity_id == str(rep.id),
+        )
+    )
+    assert count == 1
+
+
+def test_student_rejoins_with_new_history_record(env):
+    club_id = approved_club_for_memberships(env)
+    old = current_membership(env, club_id, ClubRole.STUDENT_REP)
+
+    assert end_membership(env, club_id, old.id).status_code == 200
+
+    key = uuid.uuid4()
+    first = rejoin_membership(env, club_id, old.id, key)
+    second = rejoin_membership(env, club_id, old.id, key)
+
+    assert first.status_code == 201, first.text
+    assert second.status_code == 201
+    assert first.json() == second.json()
+    assert first.json()["status"] == "ACTIVE"
+    assert first.json()["membership_id"] != str(old.id)
+
+    history = env["db"].scalars(
+        select(ClubMembership).where(
+            ClubMembership.club_id == uuid.UUID(club_id),
+            ClubMembership.role == ClubRole.STUDENT_REP,
+        )
+    ).all()
+
+    assert len(history) == 2
+    assert {m.status for m in history} == {
+        MembershipStatus.ENDED,
+        MembershipStatus.ACTIVE,
+    }
+
+
+def test_teacher_rejoins_through_new_invitation(env):
+    club_id = approved_club_for_memberships(env)
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["teacher"]
+    )
+    assert teacher_reply(env, club_id, "ACCEPT").status_code == 200
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["admin"]
+    )
+
+    old = current_membership(env, club_id, ClubRole.TEACHER_REP)
+
+    assert end_membership(env, club_id, old.id).status_code == 200
+
+    response = rejoin_membership(env, club_id, old.id)
+
+    assert response.status_code == 201, response.text
+    assert response.json()["status"] == "PENDING"
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["teacher"]
+    )
+
+    response = teacher_reply(env, club_id, "ACCEPT")
+    assert response.status_code == 200
+    assert response.json()["status"] == "ACTIVE"
+
+
+def test_rejoin_requires_ended_membership(env):
+    club_id = approved_club_for_memberships(env)
+    rep = current_membership(env, club_id, ClubRole.STUDENT_REP)
+
+    response = rejoin_membership(env, club_id, rep.id)
+    assert response.status_code == 409
+
+
+def test_cannot_rejoin_when_current_rep_exists(env):
+    club_id = approved_club_for_memberships(env)
+    rep = current_membership(env, club_id, ClubRole.STUDENT_REP)
+
+    assert end_membership(env, club_id, rep.id).status_code == 200
+    assert rejoin_membership(env, club_id, rep.id).status_code == 201
+
+    # Different request, same ended membership: not another rep.
+    response = rejoin_membership(env, club_id, rep.id)
+    assert response.status_code == 409
+
+
+def test_other_school_admin_cannot_end_membership(env):
+    club_id = approved_club_for_memberships(env)
+    rep = current_membership(env, club_id, ClubRole.STUDENT_REP)
+
+    suffix = uuid.uuid4().hex[:10]
+    other_school = register_school(
+        env["db"],
+        SchoolRegistration(
+            school_name=f"Other School {suffix}",
+            admin_full_name="Other Administrator",
+            username=f"outside_{suffix}",
+            email=f"outside_{suffix}@example.com",
+            password="SecureOtherPassword123!",
+        ),
+    )
+
+    other_admin = env["db"].get(
+        Account, other_school["admin_account_id"]
+    )
+
+    app.dependency_overrides[require_account] = (
+        lambda: other_admin
+    )
+
+    assert end_membership(env, club_id, rep.id).status_code == 404

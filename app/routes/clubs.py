@@ -37,6 +37,16 @@ from app.models.enums import MembershipStatus
 from app.services.teacher_replacement import replace_declined_teacher
 
 
+from app.schemas.membership import (
+    EndMembershipRequest,
+    MembershipResponse,
+)
+from app.services.representative_memberships import (
+    end_representative,
+    rejoin_representative,
+)
+
+
 router = APIRouter(prefix="/clubs", tags=["Clubs"])
 
 
@@ -169,6 +179,65 @@ def replace_teacher(
             student,
             club_id,
             payload.teacher_account_id,
+            idempotency_key,
+        )
+    except ClubRequestError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+        ) from exc
+
+
+@router.post(
+    "/{club_id}/memberships/{membership_id}/end",
+    response_model=MembershipResponse,
+)
+def end_club_representative(
+    club_id: UUID,
+    membership_id: UUID,
+    payload: EndMembershipRequest,
+    idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    admin: Account = Depends(
+        require_roles(AccountType.SCHOOL_ADMIN)
+    ),
+    db: Session = Depends(get_db),
+):
+    try:
+        return end_representative(
+            db,
+            admin,
+            club_id,
+            membership_id,
+            idempotency_key,
+            payload.reason,
+        )
+    except ClubRequestError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+        ) from exc
+
+
+@router.post(
+    "/{club_id}/memberships/{membership_id}/rejoin",
+    response_model=MembershipResponse,
+    status_code=201,
+)
+def rejoin_club_representative(
+    club_id: UUID,
+    membership_id: UUID,
+    idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    admin: Account = Depends(
+        require_roles(AccountType.SCHOOL_ADMIN)
+    ),
+    db: Session = Depends(get_db),
+):
+    try:
+        return rejoin_representative(
+            db,
+            admin,
+            club_id,
+            membership_id,
             idempotency_key,
         )
     except ClubRequestError as exc:
