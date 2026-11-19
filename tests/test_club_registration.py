@@ -418,3 +418,96 @@ def test_resubmission_cannot_select_student_as_teacher(env):
     assert env["db"].get(
         Club, uuid.UUID(club_id)
     ).status == ClubStatus.CHANGES_REQUESTED
+
+
+def teacher_invitation_setup(env):
+    response = submit(env)
+    assert response.status_code == 201, response.text
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["teacher"]
+    )
+    return response.json()["id"]
+
+
+def teacher_reply(env, club_id, decision):
+    return env["client"].post(
+        f"/clubs/{club_id}/teacher-invitation",
+        json={"decision": decision},
+    )
+
+
+def test_teacher_can_view_invitation(env):
+    club_id = teacher_invitation_setup(env)
+
+    response = env["client"].get("/clubs/teacher-invitations")
+
+    assert response.status_code == 200
+    assert any(
+        invitation["club_id"] == club_id
+        for invitation in response.json()
+    )
+
+
+def test_teacher_accepts_once(env):
+    club_id = teacher_invitation_setup(env)
+
+    first = teacher_reply(env, club_id, "ACCEPT")
+    second = teacher_reply(env, club_id, "ACCEPT")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json() == second.json()
+    assert first.json()["status"] == "ACTIVE"
+
+    count = env["db"].scalar(
+        select(func.count())
+        .select_from(AuditLog)
+        .where(
+            AuditLog.action == "TEACHER_INVITATION_ACCEPTED",
+            AuditLog.entity_id == first.json()["membership_id"],
+        )
+    )
+    assert count == 1
+
+
+def test_teacher_declines_once(env):
+    club_id = teacher_invitation_setup(env)
+
+    first = teacher_reply(env, club_id, "DECLINE")
+    second = teacher_reply(env, club_id, "DECLINE")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["status"] == "DECLINED"
+
+
+def test_conflicting_teacher_decision_rejected(env):
+    club_id = teacher_invitation_setup(env)
+
+    assert teacher_reply(env, club_id, "ACCEPT").status_code == 200
+    assert teacher_reply(env, club_id, "DECLINE").status_code == 409
+
+
+def test_student_cannot_accept_teacher_invitation(env):
+    club_id = teacher_invitation_setup(env)
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["student"]
+    )
+
+    assert teacher_reply(env, club_id, "ACCEPT").status_code == 403
+
+
+def test_rejected_club_invitation_cannot_be_accepted(env):
+    club_id = club_for_admin(env)
+
+    assert review_request(
+        env, club_id, "REJECTED", "Not approved."
+    ).status_code == 201
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["teacher"]
+    )
+
+    assert teacher_reply(env, club_id, "ACCEPT").status_code == 409

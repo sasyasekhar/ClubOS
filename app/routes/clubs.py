@@ -22,6 +22,16 @@ from app.services.club_review import review_club
 from app.services.club_resubmission import resubmit_club
 
 
+from app.schemas.teacher_invitation import (
+    TeacherInvitationDecision,
+    TeacherInvitationResponse,
+    PendingTeacherInvitation,
+)
+from app.services.teacher_invitation import (
+    list_teacher_invitations,
+    respond_to_invitation,
+)
+
 router = APIRouter(prefix="/clubs", tags=["Clubs"])
 
 
@@ -87,6 +97,37 @@ def resubmit_club_request(
     try:
         return resubmit_club(
             db, student, club_id, payload, idempotency_key
+        )
+    except ClubRequestError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+        ) from exc
+
+@router.get(
+    "/teacher-invitations",
+    response_model=list[PendingTeacherInvitation],
+)
+def get_teacher_invitations(
+    teacher: Account = Depends(require_roles(AccountType.TEACHER)),
+    db: Session = Depends(get_db),
+):
+    return list_teacher_invitations(db, teacher)
+
+
+@router.post(
+    "/{club_id}/teacher-invitation",
+    response_model=TeacherInvitationResponse,
+)
+def reply_to_teacher_invitation(
+    club_id: UUID,
+    payload: TeacherInvitationDecision,
+    teacher: Account = Depends(require_roles(AccountType.TEACHER)),
+    db: Session = Depends(get_db),
+):
+    try:
+        return respond_to_invitation(
+            db, teacher, club_id, payload.decision
         )
     except ClubRequestError as exc:
         raise HTTPException(
