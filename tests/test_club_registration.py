@@ -27,6 +27,7 @@ from app.schemas.auth import SchoolRegistration, MemberRegistration
 from app.services.school_registration import register_school
 from app.services.member_registration import register_member
 
+from app.models.school import School
 
 @pytest.fixture
 def env():
@@ -607,3 +608,124 @@ def test_admin_cannot_replace_teacher(env):
         env, club_id, env["teacher"].id
     )
     assert result.status_code == 403
+def make_extra_teacher(env):
+    suffix = uuid.uuid4().hex[:10]
+    school = env["db"].get(
+        School, env["student"].school_id
+    )
+
+    result = register_member(
+        env["db"],
+        MemberRegistration(
+            school_code=school.school_code,
+            full_name="Replacement Teacher",
+            username=f"teacher_{suffix}",
+            email=f"teacher_{suffix}@example.com",
+            password="SecureTeacherPassword123!",
+            account_type=AccountType.TEACHER,
+        ),
+    )
+
+    return env["db"].get(Account, result["account_id"])
+
+
+def test_replace_with_different_teacher(env):
+    club_id = declined_teacher_club(env)
+    new_teacher = make_extra_teacher(env)
+
+    response = replacement_request(
+        env, club_id, new_teacher.id
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["teacher_account_id"] == str(
+        new_teacher.id
+    )
+
+    memberships = env["db"].scalars(
+        select(ClubMembership).where(
+            ClubMembership.club_id == uuid.UUID(club_id),
+            ClubMembership.role == ClubRole.TEACHER_REP,
+        )
+    ).all()
+
+    assert len(memberships) == 2
+    assert sum(
+        m.status == MembershipStatus.PENDING
+        for m in memberships
+    ) == 1
+
+    assert sum(
+        m.status == MembershipStatus.DECLINED
+        for m in memberships
+    ) == 1
+
+
+def test_replacement_teacher_can_accept(env):
+    club_id = declined_teacher_club(env)
+    new_teacher = make_extra_teacher(env)
+
+    response = replacement_request(
+        env, club_id, new_teacher.id
+    )
+    assert response.status_code == 201
+
+    app.dependency_overrides[require_account] = (
+        lambda: new_teacher
+    )
+
+    response = teacher_reply(env, club_id, "ACCEPT")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ACTIVE"
+
+
+def test_cross_school_teacher_replacement_denied(env):
+    club_id = declined_teacher_club(env)
+    suffix = uuid.uuid4().hex[:10]
+
+    other_school = register_school(
+        env["db"],
+        SchoolRegistration(
+            school_name=f"External School {suffix}",
+            admin_full_name="External Admin",
+            username=f"external_{suffix}",
+            email=f"external_{suffix}@example.com",
+            password="SecureAdminPassword123!",
+        ),
+    )
+
+    other_teacher = register_member(
+        env["db"],
+        MemberRegistration(
+            school_code=other_school["school_code"],
+            full_name="External Teacher",
+            username=f"external_teacher_{suffix}",
+            email=f"external_teacher_{suffix}@example.com",
+            password="SecureTeacherPassword123!",
+            account_type=AccountType.TEACHER,
+        ),
+    )
+
+    response = replacement_request(
+        env, club_id, other_teacher["account_id"]
+    )
+
+    assert response.status_code == 404
+
+
+def test_replacement_key_cannot_change_teacher(env):
+    club_id = declined_teacher_club(env)
+    first_teacher = make_extra_teacher(env)
+    second_teacher = make_extra_teacher(env)
+    key = uuid.uuid4()
+
+    first = replacement_request(
+        env, club_id, first_teacher.id, key
+    )
+    second = replacement_request(
+        env, club_id, second_teacher.id, key
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 409
