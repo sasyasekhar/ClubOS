@@ -15,6 +15,7 @@ from app.models.academic_year import AcademicYear
 from app.models.audit_log import AuditLog
 from app.models.club import Club
 from app.models.club_membership import ClubMembership
+from app.models.club_review import ClubReview
 from app.models.enums import (
     AccountType,
     AcademicYearStatus,
@@ -188,3 +189,118 @@ def test_active_academic_year_required(env):
 def test_idempotency_key_is_required(env):
     response = env["client"].post("/clubs", json=payload(env))
     assert response.status_code == 422
+
+
+def review_request(env, club_id, decision, comments=None, key=None):
+    return env["client"].post(
+        f"/clubs/{club_id}/reviews",
+        json={"decision": decision, "comments": comments},
+        headers={"Idempotency-Key": str(key or uuid.uuid4())},
+    )
+
+
+def club_for_admin(env):
+    response = submit(env)
+    assert response.status_code == 201, response.text
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["admin"]
+    )
+    return response.json()["id"]
+
+
+@pytest.mark.parametrize(
+    "decision,expected",
+    [
+        ("APPROVED", ClubStatus.ACTIVE),
+        ("REJECTED", ClubStatus.REJECTED),
+        ("CHANGES_REQUESTED", ClubStatus.CHANGES_REQUESTED),
+    ],
+)
+def test_admin_review_decisions(env, decision, expected):
+    club_id = club_for_admin(env)
+
+    response = review_request(
+        env, club_id, decision, "Review explanation"
+    )
+
+    assert response.status_code == 201, response.text
+    assert env["db"].get(Club, uuid.UUID(club_id)).status == expected
+
+    if decision == "APPROVED":
+        rep = env["db"].scalar(
+            select(ClubMembership).where(
+                ClubMembership.club_id == uuid.UUID(club_id),
+                ClubMembership.role == ClubRole.STUDENT_REP,
+            )
+        )
+        assert rep is not None
+        assert rep.account_id == env["student"].id
+        assert rep.status == MembershipStatus.ACTIVE
+
+
+def test_review_requires_explanation(env):
+    club_id = club_for_admin(env)
+
+    for decision in ("REJECTED", "CHANGES_REQUESTED"):
+        response = review_request(env, club_id, decision)
+        assert response.status_code == 422
+
+
+def test_double_review_is_idempotent(env):
+    club_id = club_for_admin(env)
+    key = uuid.uuid4()
+
+    first = review_request(env, club_id, "APPROVED", key=key)
+    second = review_request(env, club_id, "APPROVED", key=key)
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json() == second.json()
+
+    assert env["db"].scalar(
+        select(func.count()).select_from(ClubReview).where(
+            ClubReview.club_id == uuid.UUID(club_id)
+        )
+    ) == 1
+
+
+def test_second_review_rejected(env):
+    club_id = club_for_admin(env)
+    assert review_request(env, club_id, "APPROVED").status_code == 201
+    assert review_request(env, club_id, "REJECTED", "No").status_code == 409
+
+
+def test_student_cannot_review(env):
+    club_id = club_for_admin(env)
+    app.dependency_overrides[require_account] = (
+        lambda: env["student"]
+    )
+
+    assert review_request(env, club_id, "APPROVED").status_code == 403
+
+
+def test_cross_school_admin_cannot_review(env):
+    club_id = club_for_admin(env)
+    suffix = uuid.uuid4().hex[:10]
+
+    other_school = register_school(
+        env["db"],
+        SchoolRegistration(
+            school_name=f"Other School {suffix}",
+            admin_full_name="Other Admin",
+            username=f"other_admin_{suffix}",
+            email=f"other_{suffix}@example.com",
+            password="SecureOtherPassword123!",
+        ),
+    )
+
+    other_admin = env["db"].get(
+        Account, other_school["admin_account_id"]
+    )
+
+    app.dependency_overrides[require_account] = (
+        lambda: other_admin
+    )
+
+    assert review_request(env, club_id, "APPROVED").status_code == 404

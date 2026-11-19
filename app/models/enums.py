@@ -14,9 +14,11 @@ class AcademicYearStatus(str, Enum):
     ARCHIVED = "ARCHIVED"
 
 
+
 class ClubStatus(str, Enum):
     PENDING = "PENDING"
     ACTIVE = "ACTIVE"
+    CHANGES_REQUESTED = "CHANGES_REQUESTED"
     REJECTED = "REJECTED"
     ARCHIVED = "ARCHIVED"
 
