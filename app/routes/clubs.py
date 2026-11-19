@@ -19,6 +19,9 @@ from app.services.club_registration import (
 from app.schemas.club import ClubReviewRequest, ClubReviewResponse
 from app.services.club_review import review_club
 
+from app.services.club_resubmission import resubmit_club
+
+
 router = APIRouter(prefix="/clubs", tags=["Clubs"])
 
 
@@ -59,6 +62,31 @@ def create_club_review(
     try:
         return review_club(
             db, admin, club_id, payload, idempotency_key
+        )
+    except ClubRequestError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+        ) from exc
+
+
+@router.post(
+    "/{club_id}/resubmit",
+    response_model=ClubRegistrationResponse,
+    status_code=status.HTTP_200_OK,
+)
+def resubmit_club_request(
+    club_id: UUID,
+    payload: ClubRegistrationRequest,
+    idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    student: Account = Depends(
+        require_roles(AccountType.STUDENT)
+    ),
+    db: Session = Depends(get_db),
+):
+    try:
+        return resubmit_club(
+            db, student, club_id, payload, idempotency_key
         )
     except ClubRequestError as exc:
         raise HTTPException(

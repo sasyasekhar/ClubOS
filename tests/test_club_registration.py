@@ -304,3 +304,117 @@ def test_cross_school_admin_cannot_review(env):
     )
 
     assert review_request(env, club_id, "APPROVED").status_code == 404
+
+def club_needing_changes(env):
+    club_id = club_for_admin(env)
+
+    response = review_request(
+        env,
+        club_id,
+        "CHANGES_REQUESTED",
+        "Please improve the description.",
+    )
+    assert response.status_code == 201, response.text
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["student"]
+    )
+    return club_id
+
+
+def resubmit(env, club_id, data=None, key=None):
+    return env["client"].post(
+        f"/clubs/{club_id}/resubmit",
+        json=data if data is not None else payload(env),
+        headers={"Idempotency-Key": str(key or uuid.uuid4())},
+    )
+
+
+def test_student_resubmits_corrected_club(env):
+    club_id = club_needing_changes(env)
+    data = payload(env)
+    data["description"] = "Updated engineering activities"
+
+    response = resubmit(env, club_id, data)
+
+    assert response.status_code == 200, response.text
+
+    club = env["db"].get(Club, uuid.UUID(club_id))
+
+    assert club.status == ClubStatus.PENDING
+    assert club.description == data["description"]
+
+    reviews = env["db"].scalars(
+        select(ClubReview).where(
+            ClubReview.club_id == club.id
+        )
+    ).all()
+
+    assert len(reviews) == 1
+
+
+def test_cannot_resubmit_pending_club(env):
+    response = submit(env)
+    assert response.status_code == 201
+
+    assert resubmit(
+        env, response.json()["id"]
+    ).status_code == 409
+
+
+def test_admin_cannot_resubmit_club(env):
+    club_id = club_needing_changes(env)
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["admin"]
+    )
+
+    assert resubmit(env, club_id).status_code == 403
+
+
+def test_resubmission_is_idempotent(env):
+    club_id = club_needing_changes(env)
+    key = uuid.uuid4()
+
+    first = resubmit(env, club_id, key=key)
+    second = resubmit(env, club_id, key=key)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json() == second.json()
+
+    count = env["db"].scalar(
+        select(func.count())
+        .select_from(AuditLog)
+        .where(
+            AuditLog.entity_id == club_id,
+            AuditLog.action == "CLUB_RESUBMITTED",
+        )
+    )
+    assert count == 1
+
+
+def test_resubmission_key_conflict(env):
+    club_id = club_needing_changes(env)
+    key = uuid.uuid4()
+
+    assert resubmit(env, club_id, key=key).status_code == 200
+
+    changed = payload(env)
+    changed["name"] = "Different Club"
+
+    assert resubmit(
+        env, club_id, changed, key
+    ).status_code == 409
+
+
+def test_resubmission_cannot_select_student_as_teacher(env):
+    club_id = club_needing_changes(env)
+    data = payload(env)
+    data["teacher_account_id"] = str(env["student"].id)
+
+    assert resubmit(env, club_id, data).status_code == 404
+
+    assert env["db"].get(
+        Club, uuid.UUID(club_id)
+    ).status == ClubStatus.CHANGES_REQUESTED
