@@ -58,3 +58,15 @@ class ActivityReviewResponse(BaseModel):
     revision_id: UUID
     decision: ActivityReviewDecision
     status: ActivityRevisionStatus
+
+
+class PublishedActivity(BaseModel):
+    activity_id: UUID
+    revision_id: UUID
+    revision_number: int
+    club_id: UUID
+    club_name: str
+    title: str
+    description: str
+    category: str
+    activity_date: date

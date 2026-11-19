@@ -1,6 +1,7 @@
 
 from uuid import UUID, NAMESPACE_URL, uuid5
 
+from alembic.command import revision
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -142,7 +143,26 @@ def review_activity(
                 409, "Revision is not awaiting review."
             )
 
+        
+        if data.decision == ActivityReviewDecision.APPROVED:
+            previous = db.scalar(
+                select(ActivityRevision)
+                .where(
+                    ActivityRevision.activity_id == activity.id,
+                    ActivityRevision.is_published.is_(True),
+                )
+                .with_for_update()
+            )
+
+            if previous is not None:
+                previous.is_published = False
+                db.flush()
+
         revision.status = STATUS_MAP[data.decision]
+        revision.is_published = (
+            data.decision == ActivityReviewDecision.APPROVED
+        )
+
 
         review = ActivityReview(
             id=review_id,
@@ -179,3 +199,6 @@ def review_activity(
     except Exception:
         db.rollback()
         raise
+
+
+

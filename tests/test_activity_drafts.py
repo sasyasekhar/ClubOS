@@ -416,7 +416,9 @@ def test_teacher_review_decisions(env, decision, expected):
     )
 
     assert revision.status == expected
-    assert revision.is_published is False
+    assert revision.is_published is (
+    decision == "APPROVED"
+        )
 
     review = env["db"].get(
         ActivityReview, response.json()["review_id"]
@@ -716,3 +718,130 @@ def test_approved_revision_cannot_be_corrected(env):
     assert correct_activity(
         env, original
     ).status_code == 409
+
+
+def test_approved_activity_visible_to_same_school(env):
+    created = submitted_for_review(env)
+
+    response = review_request(env, created, "APPROVED")
+    assert response.status_code == 201, response.text
+
+    # Another student in the same school can view it.
+    app.dependency_overrides[require_account] = (
+        lambda: env["other"]
+    )
+
+    feed = env["client"].get("/activities/published")
+    assert feed.status_code == 200, feed.text
+
+    items = feed.json()
+    assert len(items) == 1
+    assert items[0]["activity_id"] == created["activity_id"]
+    assert items[0]["revision_id"] == created["revision_id"]
+    assert items[0]["title"] == "Robotics Workshop"
+
+
+def test_pending_activity_not_visible(env):
+    created = submitted_for_review(env)
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["other"]
+    )
+
+    response = env["client"].get("/activities/published")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+@pytest.mark.parametrize(
+    "decision",
+    ["REJECTED", "CHANGES_REQUESTED"],
+)
+def test_unapproved_activity_not_visible(env, decision):
+    created = submitted_for_review(env)
+
+    assert review_request(
+        env, created, decision, "Changes required"
+    ).status_code == 201
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["other"]
+    )
+
+    response = env["client"].get("/activities/published")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_other_school_cannot_view_published_activity(env):
+    from uuid import uuid4
+
+    created = submitted_for_review(env)
+    assert review_request(
+        env, created, "APPROVED"
+    ).status_code == 201
+
+    suffix = uuid4().hex[:12]
+
+    outsider_school = School(
+        name=f"Other School {suffix}",
+        school_code=f"CLB-{suffix.upper()}",
+    )
+    env["db"].add(outsider_school)
+    env["db"].flush()
+
+    outsider = Account(
+        school_id=outsider_school.id,
+        account_type=AccountType.STUDENT,
+        full_name="Outside Student",
+        username=f"outside_{suffix}",
+        email=f"outside_{suffix}@example.com",
+        password_hash="test-only",
+    )
+    env["db"].add(outsider)
+    env["db"].commit()
+
+    app.dependency_overrides[require_account] = (
+        lambda: outsider
+    )
+
+    response = env["client"].get("/activities/published")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_archived_club_activity_is_hidden(env):
+    created = submitted_for_review(env)
+    assert review_request(
+        env, created, "APPROVED"
+    ).status_code == 201
+
+    env["club"].status = ClubStatus.ARCHIVED
+    env["db"].commit()
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["other"]
+    )
+
+    response = env["client"].get("/activities/published")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_platform_owner_denied_published_feed(env):
+    from types import SimpleNamespace
+
+    app.dependency_overrides[require_account] = (
+        lambda: SimpleNamespace(
+            account_type=AccountType.PLATFORM_OWNER,
+            school_id=None,
+            is_active=True,
+        )
+    )
+
+    response = env["client"].get("/activities/published")
+    assert response.status_code == 403
