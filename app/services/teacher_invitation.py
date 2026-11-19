@@ -84,6 +84,10 @@ def respond_to_invitation(
             ClubMembership.role == ClubRole.TEACHER_REP,
         )
         .order_by(
+            # Prefer the current invitation, including acceptance retries.
+            ClubMembership.status.in_(
+                (MembershipStatus.PENDING, MembershipStatus.ACTIVE)
+            ).desc(),
             ClubMembership.created_at.desc(),
             ClubMembership.id.desc(),
         )

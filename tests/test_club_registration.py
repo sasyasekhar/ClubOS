@@ -1,6 +1,6 @@
 
 import uuid
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -853,19 +853,35 @@ def test_teacher_rejoins_through_new_invitation(env):
     old = current_membership(env, club_id, ClubRole.TEACHER_REP)
 
     assert end_membership(env, club_id, old.id).status_code == 200
+    end_date = old.end_date
+
+    # Make the ended membership sort first by timestamp.
+    old.created_at += timedelta(seconds=1)
+    env["db"].commit()
 
     response = rejoin_membership(env, club_id, old.id)
 
     assert response.status_code == 201, response.text
     assert response.json()["status"] == "PENDING"
+    new_id = response.json()["membership_id"]
+    assert new_id != str(old.id)
 
     app.dependency_overrides[require_account] = (
         lambda: env["teacher"]
     )
 
     response = teacher_reply(env, club_id, "ACCEPT")
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     assert response.json()["status"] == "ACTIVE"
+    assert response.json()["membership_id"] == new_id
+
+    retry = teacher_reply(env, club_id, "ACCEPT")
+    assert retry.status_code == 200, retry.text
+    assert retry.json() == response.json()
+
+    env["db"].refresh(old)
+    assert old.status == MembershipStatus.ENDED
+    assert old.end_date == end_date
 
 
 def test_rejoin_requires_ended_membership(env):
