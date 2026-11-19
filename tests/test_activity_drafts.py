@@ -546,3 +546,173 @@ def test_draft_cannot_be_reviewed(env):
     assert review_request(
         env, created, "APPROVED"
     ).status_code == 409
+
+def activity_needing_corrections(env):
+    created = submitted_for_review(env)
+
+    response = review_request(
+        env,
+        created,
+        "CHANGES_REQUESTED",
+        "Please improve the activity description.",
+    )
+    assert response.status_code == 201, response.text
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["student"]
+    )
+
+    return created
+
+
+def correct_activity(env, created, data=None, key=None):
+    return env["client"].post(
+        revision_url(env, created) + "/correct",
+        json=data if data is not None else draft_data(),
+        headers={
+            "Idempotency-Key": str(key or uuid4())
+        },
+    )
+
+
+def test_corrected_revision_preserves_review_history(env):
+    original = activity_needing_corrections(env)
+
+    data = draft_data()
+    data["description"] = "Updated workshop details"
+
+    response = correct_activity(env, original, data)
+
+    assert response.status_code == 201, response.text
+
+    corrected = response.json()
+
+    assert corrected["revision_number"] == 2
+    assert corrected["revision_id"] != original["revision_id"]
+    assert corrected["activity_id"] == original["activity_id"]
+    assert corrected["status"] == "DRAFT"
+
+    old_revision = env["db"].get(
+        ActivityRevision, original["revision_id"]
+    )
+    new_revision = env["db"].get(
+        ActivityRevision, corrected["revision_id"]
+    )
+
+    assert old_revision.status == (
+        ActivityRevisionStatus.CHANGES_REQUESTED
+    )
+    assert old_revision.description == (
+        "Introduction to robotics"
+    )
+
+    assert new_revision.description == data["description"]
+    assert new_revision.is_published is False
+    assert new_revision.submitted_at is None
+
+    reviews = env["db"].scalars(
+        select(ActivityReview).where(
+            ActivityReview.revision_id == old_revision.id
+        )
+    ).all()
+
+    assert len(reviews) == 1
+
+    submitted = env["client"].post(
+        revision_url(env, corrected) + "/submit"
+    )
+
+    assert submitted.status_code == 200, submitted.text
+    assert submitted.json()["status"] == "PENDING"
+
+
+def test_correction_retry_is_idempotent(env):
+    original = activity_needing_corrections(env)
+    key = uuid4()
+
+    first = correct_activity(env, original, key=key)
+    second = correct_activity(env, original, key=key)
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json() == second.json()
+
+    count = env["db"].scalar(
+        select(func.count())
+        .select_from(AuditLog)
+        .where(
+            AuditLog.action == "ACTIVITY_CORRECTION_STARTED",
+            AuditLog.entity_id == first.json()["revision_id"],
+        )
+    )
+
+    assert count == 1
+
+
+def test_correction_key_conflict(env):
+    original = activity_needing_corrections(env)
+    key = uuid4()
+
+    assert correct_activity(
+        env, original, key=key
+    ).status_code == 201
+
+    changed = draft_data()
+    changed["title"] = "Different Workshop"
+
+    assert correct_activity(
+        env, original, changed, key
+    ).status_code == 409
+
+
+def test_cannot_create_two_corrections(env):
+    original = activity_needing_corrections(env)
+
+    assert correct_activity(
+        env, original
+    ).status_code == 201
+
+    assert correct_activity(
+        env, original
+    ).status_code == 409
+
+
+@pytest.mark.parametrize("actor", ["teacher", "other"])
+def test_unauthorized_correction(env, actor):
+    original = activity_needing_corrections(env)
+
+    app.dependency_overrides[require_account] = (
+        lambda: env[actor]
+    )
+
+    response = correct_activity(env, original)
+
+    assert response.status_code == 403
+
+
+def test_pending_revision_cannot_be_corrected(env):
+    original = submitted_for_review(env)
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["student"]
+    )
+
+    assert correct_activity(
+        env, original
+    ).status_code == 409
+
+
+def test_approved_revision_cannot_be_corrected(env):
+    original = submitted_for_review(env)
+
+    assert review_request(
+        env, original, "APPROVED"
+    ).status_code == 201
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["student"]
+    )
+
+    assert correct_activity(
+        env, original
+    ).status_code == 409
