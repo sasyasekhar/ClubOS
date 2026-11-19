@@ -1,0 +1,181 @@
+
+from uuid import UUID, NAMESPACE_URL, uuid5
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.models.account import Account
+from app.models.school import School
+from app.models.club import Club
+from app.models.academic_year import AcademicYear
+from app.models.club_membership import ClubMembership
+from app.models.activity import Activity
+from app.models.activity_revision import ActivityRevision
+from app.models.activity_review import ActivityReview
+from app.models.audit_log import AuditLog
+from app.models.enums import (
+    AccountType,
+    AcademicYearStatus,
+    ClubRole,
+    ClubStatus,
+    MembershipStatus,
+    ActivityRevisionStatus,
+    ActivityReviewDecision,
+    ReviewMode,
+)
+from app.schemas.activity import ActivityReviewRequest
+from app.services.activity_drafts import ActivityError
+
+
+STATUS_MAP = {
+    ActivityReviewDecision.APPROVED: ActivityRevisionStatus.APPROVED,
+    ActivityReviewDecision.REJECTED: ActivityRevisionStatus.REJECTED,
+    ActivityReviewDecision.CHANGES_REQUESTED:
+        ActivityRevisionStatus.CHANGES_REQUESTED,
+}
+
+
+def review_activity(
+    db: Session,
+    teacher: Account,
+    club_id: UUID,
+    activity_id: UUID,
+    revision_id: UUID,
+    data: ActivityReviewRequest,
+    idempotency_key: UUID,
+):
+    try:
+        if (
+            teacher.account_type != AccountType.TEACHER
+            or not teacher.is_active
+            or teacher.school_id is None
+        ):
+            raise ActivityError(403, "Permission denied.")
+
+        # Consistent parent lock serializes reviews and activity edits.
+        club = db.scalar(
+            select(Club).where(
+                Club.id == club_id,
+                Club.school_id == teacher.school_id,
+            ).with_for_update()
+        )
+
+        if club is None:
+            raise ActivityError(404, "Club not found.")
+
+        if club.status != ClubStatus.ACTIVE:
+            raise ActivityError(409, "Club is not active.")
+
+        school = db.get(School, club.school_id)
+        year = db.get(AcademicYear, club.academic_year_id)
+
+        if (
+            school is None
+            or not school.is_active
+            or year is None
+            or year.school_id != club.school_id
+            or year.status != AcademicYearStatus.ACTIVE
+        ):
+            raise ActivityError(409, "Academic year is not active.")
+
+        assigned = db.scalar(
+            select(ClubMembership.id).where(
+                ClubMembership.club_id == club.id,
+                ClubMembership.account_id == teacher.id,
+                ClubMembership.role == ClubRole.TEACHER_REP,
+                ClubMembership.status == MembershipStatus.ACTIVE,
+            )
+        )
+
+        if assigned is None:
+            raise ActivityError(403, "Teacher is not assigned.")
+
+        activity = db.scalar(
+            select(Activity).where(
+                Activity.id == activity_id,
+                Activity.club_id == club.id,
+            )
+        )
+
+        if activity is None:
+            raise ActivityError(404, "Activity not found.")
+
+        revision = db.scalar(
+            select(ActivityRevision).where(
+                ActivityRevision.id == revision_id,
+                ActivityRevision.activity_id == activity.id,
+            ).with_for_update()
+        )
+
+        if revision is None:
+            raise ActivityError(404, "Revision not found.")
+
+        review_id = uuid5(
+            NAMESPACE_URL,
+            f"clubos:activity-review:{teacher.id}:"
+            f"{revision_id}:{idempotency_key}",
+        )
+
+        existing = db.get(ActivityReview, review_id)
+
+        if existing is not None:
+            if (
+                existing.actor_account_id != teacher.id
+                or existing.review_mode != ReviewMode.DIRECT
+                or existing.revision_id != revision.id
+                or existing.decision != data.decision
+                or existing.comments != data.comments
+            ):
+                raise ActivityError(
+                    409, "Idempotency key conflict."
+                )
+
+            return {
+                "review_id": existing.id,
+                "revision_id": revision.id,
+                "decision": existing.decision,
+                "status": STATUS_MAP[existing.decision],
+            }
+
+        if revision.status != ActivityRevisionStatus.PENDING:
+            raise ActivityError(
+                409, "Revision is not awaiting review."
+            )
+
+        revision.status = STATUS_MAP[data.decision]
+
+        review = ActivityReview(
+            id=review_id,
+            revision_id=revision.id,
+            actor_account_id=teacher.id,
+            represented_account_id=None,
+            impersonation_session_id=None,
+            review_mode=ReviewMode.DIRECT,
+            decision=data.decision,
+            comments=data.comments,
+        )
+
+        audit = AuditLog(
+            actor_account_id=teacher.id,
+            action="ACTIVITY_REVIEWED",
+            entity_type="activity_revision",
+            entity_id=str(revision.id),
+            details={
+                "review_id": str(review_id),
+                "decision": data.decision.value,
+            },
+        )
+
+        db.add_all([review, audit])
+        db.commit()
+
+        return {
+            "review_id": review.id,
+            "revision_id": revision.id,
+            "decision": review.decision,
+            "status": revision.status,
+        }
+
+    except Exception:
+        db.rollback()
+        raise

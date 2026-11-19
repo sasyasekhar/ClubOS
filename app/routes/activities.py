@@ -23,6 +23,14 @@ from app.services.activity_workflow import (
     submit_activity_draft,
 )
 
+from app.schemas.activity import (
+    ActivityReviewRequest,
+    ActivityReviewResponse,
+)
+from app.services.activity_review import review_activity
+
+
+
 router = APIRouter(
     prefix="/clubs",
     tags=["Activities"],
@@ -99,6 +107,38 @@ def submit_draft(
     try:
         return submit_activity_draft(
             db, student, club_id, activity_id, revision_id
+        )
+    except ActivityError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+        ) from exc
+
+@router.post(
+    "/{club_id}/activities/{activity_id}/revisions/{revision_id}/review",
+    response_model=ActivityReviewResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def review_activity_revision(
+    club_id: UUID,
+    activity_id: UUID,
+    revision_id: UUID,
+    payload: ActivityReviewRequest,
+    idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    teacher: Account = Depends(
+        require_roles(AccountType.TEACHER)
+    ),
+    db: Session = Depends(get_db),
+):
+    try:
+        return review_activity(
+            db,
+            teacher,
+            club_id,
+            activity_id,
+            revision_id,
+            payload,
+            idempotency_key,
         )
     except ActivityError as exc:
         raise HTTPException(

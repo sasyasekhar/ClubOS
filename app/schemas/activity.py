@@ -7,6 +7,10 @@ from typing import Annotated
 
 from app.models.enums import ActivityRevisionStatus
 
+from pydantic import model_validator
+from app.models.enums import ActivityReviewDecision
+
+
 
 CleanTitle = Annotated[
     str,
@@ -30,4 +34,27 @@ class ActivityDraftResponse(BaseModel):
     activity_id: UUID
     revision_id: UUID
     revision_number: int
+    status: ActivityRevisionStatus
+
+class ActivityReviewRequest(BaseModel):
+    decision: ActivityReviewDecision
+    comments: str | None = Field(default=None, max_length=5000)
+
+    @model_validator(mode="after")
+    def validate_comments(self):
+        self.comments = self.comments.strip() if self.comments else None
+
+        if self.decision in (
+            ActivityReviewDecision.REJECTED,
+            ActivityReviewDecision.CHANGES_REQUESTED,
+        ) and not self.comments:
+            raise ValueError("Review explanation is required.")
+
+        return self
+
+
+class ActivityReviewResponse(BaseModel):
+    review_id: UUID
+    revision_id: UUID
+    decision: ActivityReviewDecision
     status: ActivityRevisionStatus

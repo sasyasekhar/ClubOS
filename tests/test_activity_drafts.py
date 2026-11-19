@@ -29,6 +29,7 @@ from app.models.enums import (
     ActivityRevisionStatus,
 )
 
+from app.models.activity_review import ActivityReview
 
 @pytest.fixture
 def env():
@@ -355,3 +356,193 @@ def test_closed_year_blocks_submission(env):
 
     assert response.status_code == 409
 
+
+def submitted_for_review(env):
+    created_response = create(env)
+    assert created_response.status_code == 201
+    created = created_response.json()
+
+    response = env["client"].post(
+        revision_url(env, created) + "/submit"
+    )
+    assert response.status_code == 200, response.text
+
+    env["db"].add(ClubMembership(
+        club_id=env["club"].id,
+        account_id=env["teacher"].id,
+        role=ClubRole.TEACHER_REP,
+        status=MembershipStatus.ACTIVE,
+        start_date=date.today(),
+    ))
+    env["db"].commit()
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["teacher"]
+    )
+
+    return created
+
+
+def review_request(env, created, decision, comments=None, key=None):
+    return env["client"].post(
+        revision_url(env, created) + "/review",
+        headers={"Idempotency-Key": str(key or uuid4())},
+        json={
+            "decision": decision,
+            "comments": comments,
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "decision,expected",
+    [
+        ("APPROVED", ActivityRevisionStatus.APPROVED),
+        ("REJECTED", ActivityRevisionStatus.REJECTED),
+        ("CHANGES_REQUESTED", ActivityRevisionStatus.CHANGES_REQUESTED),
+    ],
+)
+def test_teacher_review_decisions(env, decision, expected):
+    created = submitted_for_review(env)
+
+    response = review_request(
+        env, created, decision, "Reviewed activity."
+    )
+
+    assert response.status_code == 201, response.text
+
+    revision = env["db"].get(
+        ActivityRevision, created["revision_id"]
+    )
+
+    assert revision.status == expected
+    assert revision.is_published is False
+
+    review = env["db"].get(
+        ActivityReview, response.json()["review_id"]
+    )
+    assert review.actor_account_id == env["teacher"].id
+    assert review.represented_account_id is None
+
+
+@pytest.mark.parametrize(
+    "decision",
+    ["REJECTED", "CHANGES_REQUESTED"],
+)
+def test_review_explanation_required(env, decision):
+    created = submitted_for_review(env)
+
+    response = review_request(env, created, decision, "   ")
+
+    assert response.status_code == 422
+
+
+def test_review_retry_is_idempotent(env):
+    created = submitted_for_review(env)
+    key = uuid4()
+
+    first = review_request(env, created, "APPROVED", key=key)
+    second = review_request(env, created, "APPROVED", key=key)
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json() == second.json()
+
+    count = env["db"].scalar(
+        select(func.count()).select_from(ActivityReview).where(
+            ActivityReview.revision_id == created["revision_id"]
+        )
+    )
+    assert count == 1
+
+
+def test_second_review_rejected(env):
+    created = submitted_for_review(env)
+
+    assert review_request(
+        env, created, "APPROVED"
+    ).status_code == 201
+
+    assert review_request(
+        env, created, "REJECTED", "Different review"
+    ).status_code == 409
+
+
+def test_student_cannot_review(env):
+    created = submitted_for_review(env)
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["student"]
+    )
+
+    assert review_request(
+        env, created, "APPROVED"
+    ).status_code == 403
+
+
+def test_unassigned_teacher_cannot_review(env):
+    created = submitted_for_review(env)
+
+    env["db"].query(ClubMembership).filter(
+        ClubMembership.club_id == env["club"].id,
+        ClubMembership.role == ClubRole.TEACHER_REP,
+    ).delete()
+    env["db"].commit()
+
+    assert review_request(
+        env, created, "APPROVED"
+    ).status_code == 403
+
+
+def test_cross_school_teacher_cannot_review(env):
+    created = submitted_for_review(env)
+
+    suffix = uuid4().hex[:12]
+    other_school = School(
+        name=f"Outside School {suffix}",
+        school_code=f"CLB-{suffix.upper()}",
+    )
+    env["db"].add(other_school)
+    env["db"].flush()
+
+    outsider = Account(
+        school_id=other_school.id,
+        account_type=AccountType.TEACHER,
+        full_name="Outside Teacher",
+        username=f"outside_{suffix}",
+        email=f"outside_{suffix}@example.com",
+        password_hash="test-only",
+    )
+    env["db"].add(outsider)
+    env["db"].commit()
+
+    app.dependency_overrides[require_account] = (
+        lambda: outsider
+    )
+
+    assert review_request(
+        env, created, "APPROVED"
+    ).status_code == 404
+
+
+def test_draft_cannot_be_reviewed(env):
+    response = create(env)
+    assert response.status_code == 201
+    created = response.json()
+
+    env["db"].add(ClubMembership(
+        club_id=env["club"].id,
+        account_id=env["teacher"].id,
+        role=ClubRole.TEACHER_REP,
+        status=MembershipStatus.ACTIVE,
+        start_date=date.today(),
+    ))
+    env["db"].commit()
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["teacher"]
+    )
+
+    assert review_request(
+        env, created, "APPROVED"
+    ).status_code == 409
