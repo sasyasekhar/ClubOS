@@ -511,3 +511,99 @@ def test_rejected_club_invitation_cannot_be_accepted(env):
     )
 
     assert teacher_reply(env, club_id, "ACCEPT").status_code == 409
+
+def declined_teacher_club(env):
+    response = submit(env)
+    assert response.status_code == 201, response.text
+
+    club_id = response.json()["id"]
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["teacher"]
+    )
+
+    response = env["client"].post(
+        f"/clubs/{club_id}/teacher-invitation",
+        json={"decision": "DECLINE"},
+    )
+    assert response.status_code == 200, response.text
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["student"]
+    )
+    return club_id
+
+
+def replacement_request(env, club_id, teacher_id, key=None):
+    return env["client"].post(
+        f"/clubs/{club_id}/replace-teacher",
+        json={"teacher_account_id": str(teacher_id)},
+        headers={"Idempotency-Key": str(key or uuid.uuid4())},
+    )
+
+
+def test_teacher_replacement_after_decline(env):
+    club_id = declined_teacher_club(env)
+
+    response = replacement_request(
+        env, club_id, env["teacher"].id
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["status"] == "PENDING"
+
+    history = env["db"].scalars(
+        select(ClubMembership).where(
+            ClubMembership.club_id == uuid.UUID(club_id),
+            ClubMembership.role == ClubRole.TEACHER_REP,
+        )
+    ).all()
+
+    assert len(history) == 2
+    assert {m.status for m in history} == {
+        MembershipStatus.DECLINED,
+        MembershipStatus.PENDING,
+    }
+
+
+def test_replacement_is_idempotent(env):
+    club_id = declined_teacher_club(env)
+    key = uuid.uuid4()
+
+    first = replacement_request(env, club_id, env["teacher"].id, key)
+    second = replacement_request(env, club_id, env["teacher"].id, key)
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json() == second.json()
+
+
+def test_cannot_replace_pending_teacher(env):
+    response = submit(env)
+    club_id = response.json()["id"]
+
+    result = replacement_request(
+        env, club_id, env["teacher"].id
+    )
+    assert result.status_code == 409
+
+
+def test_student_cannot_select_self(env):
+    club_id = declined_teacher_club(env)
+
+    result = replacement_request(
+        env, club_id, env["student"].id
+    )
+    assert result.status_code == 404
+
+
+def test_admin_cannot_replace_teacher(env):
+    club_id = declined_teacher_club(env)
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["admin"]
+    )
+
+    result = replacement_request(
+        env, club_id, env["teacher"].id
+    )
+    assert result.status_code == 403

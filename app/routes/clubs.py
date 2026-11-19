@@ -32,6 +32,11 @@ from app.services.teacher_invitation import (
     respond_to_invitation,
 )
 
+from pydantic import BaseModel
+from app.models.enums import MembershipStatus
+from app.services.teacher_replacement import replace_declined_teacher
+
+
 router = APIRouter(prefix="/clubs", tags=["Clubs"])
 
 
@@ -128,6 +133,43 @@ def reply_to_teacher_invitation(
     try:
         return respond_to_invitation(
             db, teacher, club_id, payload.decision
+        )
+    except ClubRequestError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+        ) from exc
+
+class TeacherReplacementRequest(BaseModel):
+    teacher_account_id: UUID
+
+
+class TeacherReplacementResponse(BaseModel):
+    club_id: UUID
+    membership_id: UUID
+    teacher_account_id: UUID
+    status: MembershipStatus
+
+
+@router.post(
+    "/{club_id}/replace-teacher",
+    response_model=TeacherReplacementResponse,
+    status_code=201,
+)
+def replace_teacher(
+    club_id: UUID,
+    payload: TeacherReplacementRequest,
+    idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    student: Account = Depends(require_roles(AccountType.STUDENT)),
+    db: Session = Depends(get_db),
+):
+    try:
+        return replace_declined_teacher(
+            db,
+            student,
+            club_id,
+            payload.teacher_account_id,
+            idempotency_key,
         )
     except ClubRequestError as exc:
         raise HTTPException(
