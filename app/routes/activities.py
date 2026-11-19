@@ -31,6 +31,7 @@ from app.services.activity_review import review_activity
 
 from app.services.activity_corrections import create_corrected_draft
 
+from app.services.activity_replacements import create_replacement_draft
 
 router = APIRouter(
     prefix="/clubs",
@@ -179,3 +180,29 @@ def correct_activity_revision(
             status_code=exc.status_code,
             detail=exc.detail,
         ) from exc
+
+@router.post(
+    "/{club_id}/activities/{activity_id}/revisions/{revision_id}/replace",
+    response_model=ActivityDraftResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def replace_activity_revision(
+    club_id: UUID,
+    activity_id: UUID,
+    revision_id: UUID,
+    payload: ActivityDraftCreate,
+    idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    student: Account = Depends(require_roles(AccountType.STUDENT)),
+    db: Session = Depends(get_db),
+):
+    try:
+        return create_replacement_draft(
+            db, student, club_id, activity_id,
+            revision_id, payload, idempotency_key,
+        )
+    except ActivityError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+        ) from exc
+    

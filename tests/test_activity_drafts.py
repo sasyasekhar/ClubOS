@@ -845,3 +845,158 @@ def test_platform_owner_denied_published_feed(env):
 
     response = env["client"].get("/activities/published")
     assert response.status_code == 403
+
+
+def published_for_replacement(env):
+    original = submitted_for_review(env)
+
+    response = review_request(env, original, "APPROVED")
+    assert response.status_code == 201, response.text
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["student"]
+    )
+    return original
+
+
+def replacement_data():
+    data = draft_data()
+    data["title"] = "Updated Robotics Workshop"
+    return data
+
+
+def replace_activity(env, original, key=None, data=None):
+    return env["client"].post(
+        revision_url(env, original) + "/replace",
+        json=data if data is not None else replacement_data(),
+        headers={"Idempotency-Key": str(key or uuid4())},
+    )
+
+
+def test_replacement_keeps_old_publication(env):
+    original = published_for_replacement(env)
+
+    response = replace_activity(env, original)
+    assert response.status_code == 201, response.text
+
+    replacement = response.json()
+    assert replacement["revision_number"] == 2
+    assert replacement["status"] == "DRAFT"
+
+    assert env["client"].post(
+        revision_url(env, replacement) + "/submit"
+    ).status_code == 200
+
+    old = env["db"].get(
+        ActivityRevision, original["revision_id"]
+    )
+    new = env["db"].get(
+        ActivityRevision, replacement["revision_id"]
+    )
+
+    assert old.is_published is True
+    assert new.is_published is False
+
+    feed = env["client"].get("/activities/published")
+    assert feed.status_code == 200
+    assert feed.json()[0]["revision_id"] == original["revision_id"]
+
+
+def test_approval_switches_publication(env):
+    original = published_for_replacement(env)
+    replacement = replace_activity(env, original).json()
+
+    assert env["client"].post(
+        revision_url(env, replacement) + "/submit"
+    ).status_code == 200
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["teacher"]
+    )
+
+    response = review_request(env, replacement, "APPROVED")
+    assert response.status_code == 201, response.text
+
+    old = env["db"].get(
+        ActivityRevision, original["revision_id"]
+    )
+    new = env["db"].get(
+        ActivityRevision, replacement["revision_id"]
+    )
+
+    assert old.status == ActivityRevisionStatus.APPROVED
+    assert old.is_published is False
+    assert new.is_published is True
+
+    feed = env["client"].get("/activities/published")
+    assert feed.status_code == 200
+    assert len(feed.json()) == 1
+    assert feed.json()[0]["revision_id"] == replacement["revision_id"]
+
+    published_count = env["db"].scalar(
+        select(func.count())
+        .select_from(ActivityRevision)
+        .where(
+            ActivityRevision.activity_id == original["activity_id"],
+            ActivityRevision.is_published.is_(True),
+        )
+    )
+    assert published_count == 1
+
+
+def test_rejected_replacement_keeps_old(env):
+    original = published_for_replacement(env)
+    replacement = replace_activity(env, original).json()
+
+    assert env["client"].post(
+        revision_url(env, replacement) + "/submit"
+    ).status_code == 200
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["teacher"]
+    )
+
+    assert review_request(
+        env, replacement, "REJECTED", "Please revise."
+    ).status_code == 201
+
+    feed = env["client"].get("/activities/published")
+    assert feed.json()[0]["revision_id"] == original["revision_id"]
+
+
+def test_replacement_retry_and_key_conflict(env):
+    original = published_for_replacement(env)
+    key = uuid4()
+
+    first = replace_activity(env, original, key)
+    second = replace_activity(env, original, key)
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json() == second.json()
+
+    changed = replacement_data()
+    changed["title"] = "Different Activity"
+
+    assert replace_activity(
+        env, original, key, changed
+    ).status_code == 409
+
+
+def test_second_replacement_blocked(env):
+    original = published_for_replacement(env)
+
+    assert replace_activity(env, original).status_code == 201
+    assert replace_activity(env, original).status_code == 409
+
+
+def test_other_student_cannot_replace(env):
+    original = published_for_replacement(env)
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["other"]
+    )
+
+    assert replace_activity(
+        env, original
+    ).status_code == 403
