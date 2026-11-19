@@ -229,3 +229,129 @@ def test_missing_idempotency_key(env):
     )
 
     assert response.status_code == 422
+
+
+def revision_url(env, created):
+    return (
+        f"/clubs/{env['club'].id}/activities/"
+        f"{created['activity_id']}/revisions/"
+        f"{created['revision_id']}"
+    )
+
+
+def test_student_edits_draft(env):
+    created = create(env).json()
+    data = draft_data()
+    data["title"] = "Advanced Robotics Workshop"
+
+    response = env["client"].put(
+        revision_url(env, created),
+        json=data,
+    )
+
+    assert response.status_code == 200, response.text
+
+    revision = env["db"].get(
+        ActivityRevision, created["revision_id"]
+    )
+    assert revision.title == data["title"]
+    assert revision.status == ActivityRevisionStatus.DRAFT
+
+
+def test_identical_edit_does_not_duplicate_audit(env):
+    created = create(env).json()
+    data = draft_data()
+    data["title"] = "Updated Workshop"
+
+    url = revision_url(env, created)
+
+    assert env["client"].put(url, json=data).status_code == 200
+    assert env["client"].put(url, json=data).status_code == 200
+
+    count = env["db"].scalar(
+        select(func.count()).select_from(AuditLog).where(
+            AuditLog.entity_id == created["revision_id"],
+            AuditLog.action == "ACTIVITY_DRAFT_UPDATED",
+        )
+    )
+    assert count == 1
+
+
+def test_student_submits_draft(env):
+    created = create(env).json()
+
+    response = env["client"].post(
+        revision_url(env, created) + "/submit"
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "PENDING"
+
+    revision = env["db"].get(
+        ActivityRevision, created["revision_id"]
+    )
+
+    assert revision.submitted_at is not None
+    assert revision.is_published is False
+
+
+def test_duplicate_submission_creates_one_audit(env):
+    created = create(env).json()
+    url = revision_url(env, created) + "/submit"
+
+    first = env["client"].post(url)
+    second = env["client"].post(url)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json() == second.json()
+
+    count = env["db"].scalar(
+        select(func.count()).select_from(AuditLog).where(
+            AuditLog.entity_id == created["revision_id"],
+            AuditLog.action == "ACTIVITY_SUBMITTED",
+        )
+    )
+    assert count == 1
+
+
+def test_submitted_draft_cannot_be_edited(env):
+    created = create(env).json()
+    url = revision_url(env, created)
+
+    assert env["client"].post(url + "/submit").status_code == 200
+
+    response = env["client"].put(url, json=draft_data())
+    assert response.status_code == 409
+
+
+def test_other_student_cannot_edit_or_submit(env):
+    created = create(env).json()
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["other"]
+    )
+
+    url = revision_url(env, created)
+
+    assert env["client"].put(
+        url, json=draft_data()
+    ).status_code == 403
+
+    assert env["client"].post(
+        url + "/submit"
+    ).status_code == 403
+
+
+def test_closed_year_blocks_submission(env):
+    created = create(env).json()
+
+    env["year"].status = AcademicYearStatus.CLOSED
+    env["db"].commit()
+
+    response = env["client"].post(
+        revision_url(env, created) + "/submit"
+    )
+
+    assert response.status_code == 409
+
