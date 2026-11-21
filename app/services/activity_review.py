@@ -1,4 +1,5 @@
 
+from datetime import datetime, timezone
 from uuid import UUID, NAMESPACE_URL, uuid5
 
 from alembic.command import revision
@@ -143,7 +144,6 @@ def review_activity(
                 409, "Revision is not awaiting review."
             )
 
-        
         if data.decision == ActivityReviewDecision.APPROVED:
             previous = db.scalar(
                 select(ActivityRevision)
@@ -156,6 +156,7 @@ def review_activity(
 
             if previous is not None:
                 previous.is_published = False
+                previous.superseded_at = datetime.now(timezone.utc)
                 db.flush()
 
         revision.status = STATUS_MAP[data.decision]

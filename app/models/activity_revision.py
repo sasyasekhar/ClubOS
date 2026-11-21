@@ -1,4 +1,5 @@
 import uuid
+from datetime import date, datetime
 
 from sqlalchemy import (
     String,
@@ -39,6 +40,17 @@ class ActivityRevision(Base):
             name="ck_published_revision_approved",
         ),
 
+        CheckConstraint(
+            """content_purged_at IS NULL OR (
+                is_published = FALSE
+                AND title IS NULL
+                AND activity_date IS NULL
+                AND description IS NULL
+                AND category IS NULL
+            )""",
+            name="ck_purged_revision_empty",
+        ),
+
         Index(
             "uq_one_published_revision_per_activity",
             "activity_id",
@@ -61,24 +73,24 @@ class ActivityRevision(Base):
         nullable=False,
     )
 
-    title: Mapped[str] = mapped_column(
+    title: Mapped[str | None] = mapped_column(
         String(200),
-        nullable=False,
+        nullable=True,
     )
 
-    activity_date: Mapped[Date] = mapped_column(
+    activity_date: Mapped[date | None] = mapped_column(
         Date,
-        nullable=False,
+        nullable=True,
     )
 
-    description: Mapped[str] = mapped_column(
+    description: Mapped[str | None] = mapped_column(
         Text,
-        nullable=False,
+        nullable=True,
     )
 
-    category: Mapped[str] = mapped_column(
+    category: Mapped[str | None] = mapped_column(
         String(100),
-        nullable=False,
+        nullable=True,
     )
 
     status: Mapped[ActivityRevisionStatus] = mapped_column(
@@ -100,10 +112,19 @@ class ActivityRevision(Base):
         nullable=True,
     )
 
+    superseded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+
+    content_purged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
         nullable=False,
     )
-
-    

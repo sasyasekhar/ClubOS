@@ -31,6 +31,14 @@ from app.models.enums import (
 
 from app.models.activity_review import ActivityReview
 
+from datetime import datetime, timedelta, timezone
+
+from app.models.activity_attachment import ActivityAttachment
+from app.services.revision_retention import (
+    purge_expired_superseded_content,
+)
+
+
 @pytest.fixture
 def env():
     if engine.url.database != "clubos_test":
@@ -1000,3 +1008,146 @@ def test_other_student_cannot_replace(env):
     assert replace_activity(
         env, original
     ).status_code == 403
+
+def approved_replacement_for_cleanup(env):
+    original = published_for_replacement(env)
+    replacement = replace_activity(env, original).json()
+
+    response = env["client"].post(
+        revision_url(env, replacement) + "/submit"
+    )
+    assert response.status_code == 200, response.text
+
+    app.dependency_overrides[require_account] = (
+        lambda: env["teacher"]
+    )
+
+    response = review_request(env, replacement, "APPROVED")
+    assert response.status_code == 201, response.text
+
+    return original, replacement
+
+
+def test_replacement_starts_retention(env):
+    original, replacement = approved_replacement_for_cleanup(env)
+
+    old = env["db"].get(
+        ActivityRevision, original["revision_id"]
+    )
+
+    assert old.is_published is False
+    assert old.superseded_at is not None
+    assert old.content_purged_at is None
+    assert old.title == "Robotics Workshop"
+
+
+def test_content_retained_before_30_days(env):
+    original, _ = approved_replacement_for_cleanup(env)
+    db = env["db"]
+
+    old = db.get(ActivityRevision, original["revision_id"])
+    now = old.superseded_at + timedelta(days=29)
+
+    assert purge_expired_superseded_content(
+        db, now=now
+    ) == 0
+
+    db.refresh(old)
+    assert old.title == "Robotics Workshop"
+    assert old.content_purged_at is None
+
+
+def test_content_purged_at_30_days(env):
+    original, replacement = approved_replacement_for_cleanup(env)
+    db = env["db"]
+
+    old = db.get(ActivityRevision, original["revision_id"])
+    now = old.superseded_at + timedelta(days=30)
+
+    creation_audit = db.scalar(
+        select(AuditLog).where(
+            AuditLog.action == "ACTIVITY_DRAFT_CREATED",
+            AuditLog.details["revision_id"].astext
+            == original["revision_id"],
+        )
+    )
+    assert creation_audit is not None
+    assert "payload" in creation_audit.details
+
+    assert purge_expired_superseded_content(
+        db, now=now
+    ) == 1
+
+    db.refresh(old)
+    db.refresh(creation_audit)
+
+    assert old.title is None
+    assert old.description is None
+    assert old.category is None
+    assert old.activity_date is None
+    assert old.content_purged_at == now
+
+    assert "payload" not in creation_audit.details
+
+    # Review records remain valid.
+    review = db.scalar(
+        select(ActivityReview).where(
+            ActivityReview.revision_id == old.id
+        )
+    )
+    assert review is not None
+
+    # The replacement is still published.
+    new = db.get(
+        ActivityRevision, replacement["revision_id"]
+    )
+    assert new.is_published is True
+    assert new.title == "Updated Robotics Workshop"
+
+    # Repeated cleanup has no extra effect.
+    assert purge_expired_superseded_content(
+        db, now=now
+    ) == 0
+
+
+def test_attachment_prevents_unsafe_purge(env):
+    original, _ = approved_replacement_for_cleanup(env)
+    db = env["db"]
+
+    old = db.get(ActivityRevision, original["revision_id"])
+
+    db.add(ActivityAttachment(
+        revision_id=old.id,
+        file_name="report.pdf",
+        storage_key="test/placeholder.pdf",
+        file_type="application/pdf",
+    ))
+    db.commit()
+
+    now = old.superseded_at + timedelta(days=31)
+
+    assert purge_expired_superseded_content(
+        db, now=now
+    ) == 0
+
+    db.refresh(old)
+    assert old.content_purged_at is None
+    assert old.title == "Robotics Workshop"
+
+
+def test_published_revision_never_purged(env):
+    original = published_for_replacement(env)
+    db = env["db"]
+
+    revision = db.get(
+        ActivityRevision, original["revision_id"]
+    )
+
+    assert purge_expired_superseded_content(
+        db,
+        now=datetime.now(timezone.utc) + timedelta(days=365),
+    ) == 0
+
+    db.refresh(revision)
+    assert revision.is_published is True
+    assert revision.content_purged_at is None
