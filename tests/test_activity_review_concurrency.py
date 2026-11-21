@@ -1,6 +1,6 @@
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from queue import Queue
 from threading import Barrier
@@ -305,3 +305,141 @@ def test_simultaneous_conflicting_decisions(scenario, monkeypatch):
 
     expected = ActivityRevisionStatus(winner["status"])
     assert_single_review(scenario, expected)
+
+
+@pytest.fixture
+def pending_published_replacement(scenario):
+    # Prepare a published v1 and a pending v2.
+    with SessionLocal.begin() as db:
+        original = db.get(
+            ActivityRevision, scenario.revision_id
+        )
+        original.status = ActivityRevisionStatus.APPROVED
+        original.is_published = True
+
+        replacement = ActivityRevision(
+            activity_id=scenario.activity_id,
+            revision_number=2,
+            title="Updated Robotics Workshop",
+            activity_date=date.today(),
+            description="Updated workshop details",
+            category="STEM",
+            status=ActivityRevisionStatus.PENDING,
+            is_published=False,
+            submitted_at=datetime.now(timezone.utc),
+        )
+        db.add(replacement)
+        db.flush()
+        replacement_id = replacement.id
+
+    replacement_scenario = replace(
+        scenario,
+        revision_id=replacement_id,
+    )
+
+    try:
+        yield scenario.revision_id, replacement_scenario
+    finally:
+        # Remove v2 reviews before the existing scenario
+        # fixture deletes the activity and revisions.
+        with SessionLocal.begin() as db:
+            db.execute(
+                delete(ActivityReview).where(
+                    ActivityReview.revision_id == replacement_id
+                )
+            )
+
+
+def assert_publication_state(
+    activity_id,
+    original_id,
+    replacement_id,
+    expected_published_id,
+):
+    with SessionLocal() as db:
+        original = db.get(ActivityRevision, original_id)
+        replacement = db.get(ActivityRevision, replacement_id)
+
+        assert original is not None
+        assert replacement is not None
+
+        published = db.scalars(
+            select(ActivityRevision).where(
+                ActivityRevision.activity_id == activity_id,
+                ActivityRevision.is_published.is_(True),
+            )
+        ).all()
+
+        assert len(published) == 1
+        assert published[0].id == expected_published_id
+
+
+def test_concurrent_replacement_approval_same_key(
+    pending_published_replacement,
+    monkeypatch,
+):
+    original_id, scenario = pending_published_replacement
+    key = uuid4()
+
+    responses = concurrent_reviews(
+        monkeypatch,
+        scenario,
+        [("APPROVED", key), ("APPROVED", key)],
+    )
+
+    assert [r.status_code for r in responses] == [201, 201], [
+        r.text for r in responses
+    ]
+    assert responses[0].json() == responses[1].json()
+
+    assert_single_review(
+        scenario, ActivityRevisionStatus.APPROVED
+    )
+
+    assert_publication_state(
+        scenario.activity_id,
+        original_id,
+        scenario.revision_id,
+        scenario.revision_id,
+    )
+
+
+def test_concurrent_conflicting_replacement_reviews(
+    pending_published_replacement,
+    monkeypatch,
+):
+    original_id, scenario = pending_published_replacement
+
+    responses = concurrent_reviews(
+        monkeypatch,
+        scenario,
+        [
+            ("APPROVED", uuid4()),
+            ("REJECTED", uuid4()),
+        ],
+    )
+
+    assert sorted(r.status_code for r in responses) == [
+        201, 409
+    ], [r.text for r in responses]
+
+    winner = next(
+        r for r in responses if r.status_code == 201
+    ).json()
+
+    expected_status = ActivityRevisionStatus(winner["status"])
+
+    assert_single_review(scenario, expected_status)
+
+    expected_published_id = (
+        scenario.revision_id
+        if expected_status == ActivityRevisionStatus.APPROVED
+        else original_id
+    )
+
+    assert_publication_state(
+        scenario.activity_id,
+        original_id,
+        scenario.revision_id,
+        expected_published_id,
+    )
