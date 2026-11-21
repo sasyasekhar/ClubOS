@@ -1,6 +1,6 @@
 
 from datetime import date
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -37,6 +37,14 @@ from app.models.activity_attachment import ActivityAttachment
 from app.services.revision_retention import (
     purge_expired_superseded_content,
 )
+
+from app.services.attachment_policy import (
+    validate_attachment,
+    ensure_upload_allowed,
+    AttachmentValidationError,
+    MAX_FILE_SIZE,
+)
+from app.services.activity_drafts import ActivityError
 
 
 @pytest.fixture
@@ -1151,3 +1159,98 @@ def test_published_revision_never_purged(env):
     db.refresh(revision)
     assert revision.is_published is True
     assert revision.content_purged_at is None
+@pytest.mark.parametrize(
+    "filename,mime,content",
+    [
+        ("report.pdf", "application/pdf", b"%PDF-1.7 test"),
+        (
+            "image.png",
+            "image/png",
+            b"\x89PNG\r\n\x1a\n" + b"test",
+        ),
+        (
+            "photo.jpg",
+            "image/jpeg",
+            b"\xff\xd8\xff" + b"test",
+        ),
+    ],
+)
+def test_allowed_attachment_types(filename, mime, content):
+    result = validate_attachment(filename, mime, content)
+
+    assert result.file_name == filename
+    assert result.file_type == mime
+    assert result.size == len(content)
+
+
+@pytest.mark.parametrize(
+    "filename,mime,content",
+    [
+        ("script.exe", "application/octet-stream", b"data"),
+        ("fake.pdf", "application/pdf", b"not a pdf"),
+        ("image.png", "application/pdf", b"%PDF-1.7"),
+        ("../report.pdf", "application/pdf", b"%PDF-1.7"),
+        ("empty.pdf", "application/pdf", b""),
+    ],
+)
+def test_invalid_attachment_rejected(filename, mime, content):
+    with pytest.raises(AttachmentValidationError):
+        validate_attachment(filename, mime, content)
+
+
+def test_oversized_attachment_rejected():
+    with pytest.raises(AttachmentValidationError):
+        validate_attachment(
+            "large.pdf",
+            "application/pdf",
+            b"%PDF-" + b"x" * MAX_FILE_SIZE,
+        )
+
+
+def test_active_representative_can_attach_to_draft(env):
+    created = create(env).json()
+
+    revision = ensure_upload_allowed(
+        env["db"],
+        env["student"],
+        env["club"].id,
+        UUID(created["activity_id"]),
+        UUID(created["revision_id"]),
+    )
+
+    assert str(revision.id) == created["revision_id"]
+
+
+def test_other_student_cannot_attach(env):
+    created = create(env).json()
+
+    with pytest.raises(ActivityError) as error:
+        ensure_upload_allowed(
+            env["db"],
+            env["other"],
+            env["club"].id,
+            UUID(created["activity_id"]),
+            UUID(created["revision_id"]),
+        )
+
+    assert error.value.status_code == 403
+
+
+def test_submitted_revision_cannot_receive_attachments(env):
+    created = create(env).json()
+
+    response = env["client"].post(
+        revision_url(env, created) + "/submit"
+    )
+    assert response.status_code == 200
+
+    with pytest.raises(ActivityError) as error:
+        ensure_upload_allowed(
+            env["db"],
+            env["student"],
+            env["club"].id,
+            UUID(created["activity_id"]),
+            UUID(created["revision_id"]),
+        )
+
+    assert error.value.status_code == 409
