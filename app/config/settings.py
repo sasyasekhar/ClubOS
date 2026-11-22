@@ -1,3 +1,6 @@
+from pathlib import Path
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -8,6 +11,9 @@ class Settings(BaseSettings):
     DB_USER: str = "clubos_user"
     DB_PASSWORD: str
     COOKIE_SECURE: bool = False
+    APP_ENV: Literal["development", "test", "production"] = "development"
+    ATTACHMENT_STORAGE_BACKEND: Literal["local"] = "local"
+    ATTACHMENT_STORAGE_DIRECTORY: Path = Path(".clubos-attachments")
 
     model_config = SettingsConfigDict(
         env_file=".env",

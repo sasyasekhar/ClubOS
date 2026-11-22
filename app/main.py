@@ -2,9 +2,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from app.routes import auth, clubs, activities, publications
+from app.services.storage import get_attachment_storage
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-
+    get_attachment_storage()
     yield
 
 app = FastAPI(
