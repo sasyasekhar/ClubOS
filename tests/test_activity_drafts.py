@@ -3,6 +3,7 @@ from datetime import date
 from uuid import UUID, uuid4
 
 import pytest
+from attachment_samples import JPEG, PNG, png_chunk, sample_pdf
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -1162,17 +1163,10 @@ def test_published_revision_never_purged(env):
 @pytest.mark.parametrize(
     "filename,mime,content",
     [
-        ("report.pdf", "application/pdf", b"%PDF-1.7 test"),
-        (
-            "image.png",
-            "image/png",
-            b"\x89PNG\r\n\x1a\n" + b"test",
-        ),
-        (
-            "photo.jpg",
-            "image/jpeg",
-            b"\xff\xd8\xff" + b"test",
-        ),
+        ("report.pdf", "application/pdf", sample_pdf()),
+        ("image.png", "image/png", PNG),
+        ("photo.jpg", "image/jpeg", JPEG),
+        ("फ़ोटो.JPEG", "image/jpeg", JPEG),
     ],
 )
 def test_allowed_attachment_types(filename, mime, content):
@@ -1188,8 +1182,8 @@ def test_allowed_attachment_types(filename, mime, content):
     [
         ("script.exe", "application/octet-stream", b"data"),
         ("fake.pdf", "application/pdf", b"not a pdf"),
-        ("image.png", "application/pdf", b"%PDF-1.7"),
-        ("../report.pdf", "application/pdf", b"%PDF-1.7"),
+        ("image.png", "application/pdf", PNG),
+        ("fake.pdf", "application/pdf", PNG),
         ("empty.pdf", "application/pdf", b""),
     ],
 )
@@ -1198,13 +1192,68 @@ def test_invalid_attachment_rejected(filename, mime, content):
         validate_attachment(filename, mime, content)
 
 
+@pytest.mark.parametrize(
+    "filename,mime,content",
+    [
+        ("truncated.pdf", "application/pdf", sample_pdf()[:-4]),
+        ("no-xref.pdf", "application/pdf", b"%PDF-1.7\nstartxref\n99\n%%EOF\n"),
+        ("truncated.png", "image/png", PNG[:-1]),
+        ("invalid-crc.png", "image/png", PNG[:-1] + bytes([PNG[-1] ^ 1])),
+        ("no-image-data.png", "image/png", PNG[:33] + PNG[-12:]),
+        ("truncated.jpg", "image/jpeg", JPEG[:-2]),
+        ("invalid-segment.jpg", "image/jpeg", JPEG[:4] + b"\xff\xff" + JPEG[6:]),
+    ],
+)
+def test_incomplete_or_malformed_attachment_rejected(filename, mime, content):
+    with pytest.raises(AttachmentValidationError, match="malformed"):
+        validate_attachment(filename, mime, content)
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "",
+        "x" * 252 + ".pdf",
+        "../report.pdf",
+        "..\\report.pdf",
+        "/report.pdf",
+        "C:\\report.pdf",
+        "C:report.pdf",
+        "report\x00.pdf",
+        "report\r\n.pdf",
+        "report\x7f.pdf",
+        "report\u202e.pdf",
+        "report\u2028.pdf",
+        '"report".pdf',
+        "NUL.pdf",
+        ".hidden.pdf",
+        "report.pdf ",
+    ],
+)
+def test_unsafe_attachment_filename_rejected(filename):
+    with pytest.raises(AttachmentValidationError, match="Invalid filename"):
+        validate_attachment(filename, "application/pdf", sample_pdf())
+
+
 def test_oversized_attachment_rejected():
-    with pytest.raises(AttachmentValidationError):
+    with pytest.raises(AttachmentValidationError, match="Invalid file size"):
         validate_attachment(
             "large.pdf",
             "application/pdf",
             b"%PDF-" + b"x" * MAX_FILE_SIZE,
         )
+
+
+def test_attachment_at_max_size_and_filename_length_is_allowed():
+    # Add a valid ancillary chunk to pad the sample to exactly the limit.
+    text = b"Note\0".ljust(MAX_FILE_SIZE - len(PNG) - 12, b"x")
+    image = PNG[:33] + png_chunk(b"tEXt", text) + PNG[33:]
+    filename = "x" * 251 + ".png"
+
+    validated = validate_attachment(filename, "image/png", image)
+
+    assert validated.size == MAX_FILE_SIZE
+    assert validated.file_name == filename
 
 
 def test_active_representative_can_attach_to_draft(env):
@@ -1251,6 +1300,30 @@ def test_submitted_revision_cannot_receive_attachments(env):
             env["club"].id,
             UUID(created["activity_id"]),
             UUID(created["revision_id"]),
+        )
+
+    assert error.value.status_code == 409
+
+
+def test_purged_revision_cannot_receive_attachments(env):
+    created = create(env).json()
+    db = env["db"]
+    revision_id = UUID(created["revision_id"])
+    revision = db.get(ActivityRevision, revision_id)
+    revision.title = None
+    revision.activity_date = None
+    revision.description = None
+    revision.category = None
+    revision.content_purged_at = datetime.now(timezone.utc)
+    db.commit()
+
+    with pytest.raises(ActivityError) as error:
+        ensure_upload_allowed(
+            db,
+            env["student"],
+            env["club"].id,
+            UUID(created["activity_id"]),
+            revision_id,
         )
 
     assert error.value.status_code == 409

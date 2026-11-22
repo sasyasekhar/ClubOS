@@ -36,6 +36,14 @@ class ActivityDraftResponse(BaseModel):
     revision_number: int
     status: ActivityRevisionStatus
 
+
+class ActivityAttachmentResponse(BaseModel):
+    id: UUID
+    revision_id: UUID
+    file_name: str
+    file_type: str
+
+
 class ActivityReviewRequest(BaseModel):
     decision: ActivityReviewDecision
     comments: str | None = Field(default=None, max_length=5000)
