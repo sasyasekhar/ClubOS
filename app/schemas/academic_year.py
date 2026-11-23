@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator, model_validator
 
-from app.models.enums import AcademicYearStatus
+from app.models.enums import AcademicYearStatus, ClosureRequestStatus
 
 
 class AcademicYearCreate(BaseModel):
@@ -70,3 +70,31 @@ class AcademicYearClosureReadiness(BaseModel):
     can_close: bool
     pending_review_blocker_count: int
     pending_review_blockers: list[PendingReviewBlocker]
+
+
+class ClosureTeacherDesignation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    teacher_account_id: UUID
+
+
+class ClosureTeacherResponse(BaseModel):
+    teacher_account_id: UUID | None
+
+
+class ClosureRequestResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    academic_year_id: UUID
+    teacher_account_id: UUID
+    requested_at: datetime
+    status: ClosureRequestStatus
+    confirmed_by_account_id: UUID | None
+    confirmed_at: datetime | None
+
+
+class ClosureConfirmation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: UUID

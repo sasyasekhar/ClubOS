@@ -23,13 +23,16 @@ logger = logging.getLogger(__name__)
 PENDING_BLOCKER_LIMIT = 50
 
 
-def _closure_readiness_query(school_id: UUID, year_id: UUID) -> Select:
-    year = (
+def _selected_year(school_id: UUID, year_id: UUID):
+    return (
         select(AcademicYear.id, AcademicYear.school_id, AcademicYear.status)
         .where(AcademicYear.id == year_id, AcademicYear.school_id == school_id)
         .cte("selected_year")
     )
-    revisions = (
+
+
+def _year_revisions(year) -> Select:
+    return (
         select(
             Club.id.label("club_id"),
             Activity.id.label("activity_id"),
@@ -39,8 +42,19 @@ def _closure_readiness_query(school_id: UUID, year_id: UUID) -> Select:
         .join(Activity, Activity.id == ActivityRevision.activity_id)
         .join(Club, Club.id == Activity.club_id)
         .join(year, and_(Club.academic_year_id == year.c.id, Club.school_id == year.c.school_id))
-        .cte("year_revisions")
     )
+
+
+def count_pending_reviews(db: Session, school_id: UUID, year_id: UUID) -> int:
+    pending = _year_revisions(_selected_year(school_id, year_id)).where(
+        ActivityRevision.status == ActivityRevisionStatus.PENDING
+    )
+    return db.execute(select(func.count()).select_from(pending.subquery())).scalar_one()
+
+
+def _closure_readiness_query(school_id: UUID, year_id: UUID) -> Select:
+    year = _selected_year(school_id, year_id)
+    revisions = _year_revisions(year).cte("year_revisions")
     counts = select(*(
         func.count().filter(revisions.c.status == status).label(status.value)
         for status in ActivityRevisionStatus

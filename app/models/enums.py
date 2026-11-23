@@ -14,6 +14,10 @@ class AcademicYearStatus(str, Enum):
     ARCHIVED = "ARCHIVED"
 
 
+class ClosureRequestStatus(str, Enum):
+    PENDING = "PENDING"
+    CONFIRMED = "CONFIRMED"
+
 
 class ClubStatus(str, Enum):
     PENDING = "PENDING"

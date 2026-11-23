@@ -9,9 +9,9 @@ from app.models.enums import AcademicYearStatus
 
 
 def lock_academic_year_for_write(
-    db: Session, school_id: UUID, year_id: UUID | None = None
+    db: Session, school_id: UUID, year_id: UUID | None = None, *, exclusive: bool = False,
 ) -> AcademicYear | None:
-    """Share-lock a scoped year, defaulting to the school's current active year.
+    """Lock a scoped year, defaulting to a shared lock on the school's active year.
 
     Callers hold the lock through their transaction and check the returned status
     before mutation. Selecting by ID also supports read-only idempotent replays.
@@ -22,7 +22,7 @@ def lock_academic_year_for_write(
     else:
         query = query.where(AcademicYear.id == year_id)
 
-    return db.scalar(query.with_for_update(read=True).execution_options(populate_existing=True))
+    return db.scalar(query.with_for_update(read=not exclusive).execution_options(populate_existing=True))
 
 
 def lock_club_for_year_write(
