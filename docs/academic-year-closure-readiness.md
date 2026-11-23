@@ -4,8 +4,9 @@
 
 - `academic_year_id` and `status` identify the selected year.
 - `counts` reports revision totals for `PENDING`, `DRAFT`, `CHANGES_REQUESTED`, `APPROVED`, and `REJECTED`, including zero totals.
-- `can_close` is true when the year is `ACTIVE` and has zero pending revisions. Pending revisions from inactive clubs also block readiness. Drafts and change-requested revisions remain unfinished history. Approved and rejected revisions are resolved, and existing review validation requires an explanation for rejection.
-- `pending_review_blocker_count` gives the exact pending total. `pending_review_blockers` contains up to 50 entries ordered by `revision_id`, each with `club_id`, `activity_id`, and `revision_id`. A count greater than the list length means additional blockers exist.
+- `can_initiate` identifies an `ACTIVE` year with no closure request. Initiation requires the current designated teacher, and pending reviews are included in monitoring from the start of the window.
+- `window_status` is `NOT_REQUESTED`, `OPEN`, `EXPIRED`, `FINALIZED`, or `CONFIRMED`. `completion_deadline_at` and `finalized_at` show the cutoff and processing time. `can_confirm` becomes true for an active year with an expired request, including when confirmation still needs to reconcile pending reviews. `can_close` is an alias for `can_confirm`.
+- `pending_review_blocker_count` gives the exact pending total. `pending_review_blockers` contains up to 50 entries ordered by `revision_id`, each with `club_id`, `activity_id`, and `revision_id`. `pending_review_attention_count` counts pending reviews in inactive clubs or without an eligible teacher. `auto_rejected_count` counts recorded system rejections.
 
 The endpoint reads the year status, counts, and blocker entries from one SQL statement snapshot. Counts come from revisions joined through activities and clubs in the selected school and year. Review history can contain multiple rows for a revision, so it is excluded from the count query.
 
@@ -15,27 +16,38 @@ The endpoint reads the year status, counts, and blocker entries from one SQL sta
 | --- | --- |
 | `GET /academic-years/closure-teacher` | An assigned school administrator can read their school's `teacher_account_id`. The value is `null` until the school has a designation. |
 | `PUT /academic-years/closure-teacher` | An assigned school administrator sets `teacher_account_id` to an active teacher from the same school. A designation applies across years, and each change produces an audit event. |
-| `POST /academic-years/{year_id}/closure-request` | The designated active teacher sends a UUID `Idempotency-Key`. A successful request returns `201` with the request ID and `PENDING` status. An exact replay returns the stored request. |
+| `POST /academic-years/{year_id}/closure-request` | The designated active teacher sends a UUID `Idempotency-Key`. A successful request returns `201` with the request ID, `PENDING` status, and original deadline. A replay returns the same request and its current status. A distinct duplicate returns `409` with code `ACADEMIC_YEAR_CLOSURE_REQUEST_EXISTS`, the request ID, and existing deadline. |
 | `GET /academic-years/{year_id}/closure-request` | An assigned school administrator can read the closure request for their selected year. The response is `null` until a request exists. |
-| `POST /academic-years/{year_id}/confirm-closure` | An assigned school administrator supplies `request_id` in the body. A successful confirmation returns `CONFIRMED` and records `CLOSED` on the year. Repeating the same confirmation returns the recorded result. |
+| `GET /academic-years/{year_id}/pending-review-alerts` | Teachers see their assigned pending reviews during an open window. The School Admin sees school-wide pending reviews for the year and can use `attention_only=true` to find work without an eligible reviewer. Use `limit` (1–50) and `after` from the response's `next_cursor` to page. |
+| `POST /academic-years/{year_id}/confirm-closure` | An assigned school administrator supplies `request_id` in the body. Before the deadline, the API returns `409` with code `ACADEMIC_YEAR_COMPLETION_WINDOW_OPEN`. A successful confirmation after the deadline returns `CONFIRMED` and records `CLOSED` on the year. Repeating the same confirmation returns the recorded result. |
 
-Initiation and confirmation return `409` with `pending_review_blocker_count` when pending activity revisions block closure. Confirmation records the year status, request status, confirming administrator, timestamp, and audit event in one transaction. It preserves the school's existing academic records.
+A request opens a 168-hour window from its stored PostgreSQL timestamp. The year remains `ACTIVE` while students and teachers complete eligible work. Alert polling reads current pending work without creating records, and reviews disappear from the list when resolved. Teacher reassignment or deactivation preserves the original request and deadline. Only the currently designated active teacher can initiate a new request.
+
+At the deadline, the backend rejects new academic-year activity and club mutations with `409` and code `ACADEMIC_YEAR_COMPLETION_WINDOW_ENDED`. Read-only historical access remains available. Finalization rejects still-pending revisions with the reason `Academic-year deadline expired` and stores separate system-action history. It preserves manual reviews, existing publications, attachments, and unfinished drafts and change requests. Exports include `activity_deadline_rejections.csv` when the selected year has system rejections.
+
+Confirmation reconciles overdue work if necessary and records the year status, request status, confirming administrator, timestamp, and audit event in the same transaction.
 
 ## Concurrency at closure confirmation
 
-The readiness response is a point-in-time observation. A student can submit a draft after a zero-blocker check, and a teacher can resolve a pending review while a confirmation is waiting. Submission and review take a shared year lock before locking the club and revision. Initiation and confirmation coordinate with those writers through the same year row. Locking existing pending revisions leaves draft-to-pending transitions and new rows possible.
+Readiness is a point-in-time observation. Submission and review take a shared year lock before locking the club and revision. Initiation, finalization, and confirmation coordinate with those writers through the same year row.
 
 The workflow follows this PostgreSQL locking protocol.
 
-1. Resolve the authorized school and year from scoped database relationships. For normal writes that require an active year, take `FOR SHARE` on that year before locking any club or revision. Recheck `ACTIVE` on the locked row, then validate the club, activity, revision, and authorization in their current scope. Hold all locks through commit or rollback. Shared year locks allow writers in different clubs to proceed concurrently. [PostgreSQL row-level locking](https://www.postgresql.org/docs/17/explicit-locking.html#LOCKING-ROWS)
-2. Initiation share-locks the school's designation, then exclusively locks the year and checks pending revisions before inserting a request. Confirmation locks the school and school-admin assignment, takes `FOR UPDATE` on the year, and locks the specified request. Run the fresh, school-scoped blocker query in a separate statement after obtaining the locks. `READ COMMITTED` lets it see submissions and reviews committed while confirmation waited. A writer waiting behind successful confirmation sees `CLOSED` when it acquires the year lock and rejects activity writes that require `ACTIVE`. [PostgreSQL transaction isolation](https://www.postgresql.org/docs/17/transaction-iso.html#XACT-READ-COMMITTED)
+1. Writers take `FOR SHARE` on the scoped year before acquiring club or revision locks. They check PostgreSQL's current time after obtaining the locks needed for mutation. A write admitted before the cutoff can commit while holding its shared lock, and the exclusive finalization lock waits for it. [PostgreSQL row-level locking](https://www.postgresql.org/docs/17/explicit-locking.html#LOCKING-ROWS)
+2. Initiation share-locks the school's designation and exclusively locks the year. Finalization locks the year `FOR UPDATE`, then the request. Confirmation first locks the school and school-admin assignment, then takes the same exclusive year and request locks. Fresh `READ COMMITTED` queries see submissions and reviews committed while the exclusive lock was waiting. [PostgreSQL transaction isolation](https://www.postgresql.org/docs/17/transaction-iso.html#XACT-READ-COMMITTED)
 3. Keep the order consistent across writers. If an operation needs a school or school-admin row lock, acquire it before the year lock, including locks implied by foreign keys on insert. Acquire the year before any closure-request, club, and revision rows the operation needs. The guard covers submission and review, draft creation and edits, correction and replacement drafts, attachment uploads, club registration and reviews, and representative changes. Future jobs that can change revision status or move records into or out of a year must use the same guard. With multi-year operations, acquire year locks in a consistent order and revalidate ownership before writing.
-4. Deploy the writer guards everywhere and let older writer transactions finish before enabling confirmation. The PostgreSQL integration tests exercise competing confirmations and both orderings of confirmation versus activity submission with independent connections.
+4. Deploy the writer guards everywhere and let older writer transactions finish before running the finalizer or enabling confirmation. The PostgreSQL integration tests exercise competing finalizers, competing confirmations, and the ordering of confirmation and activity writes with independent connections.
 
 The existing ZIP export takes its own reporting snapshot. Its advisory lock serializes exports and has a separate purpose from the year lock. Attachment reconciliation and superseded-content retention currently leave revision status and year ownership intact. Their operation after closure depends on the lifecycle policy.
 
-## Product decisions still needed
+## Deploying deadline processing
 
-The workflow preserves a pending request if confirmation encounters blockers or the requester's designation has changed or the account is inactive. It returns a conflict and leaves the year active. Reappointing a teacher creates a fresh designation. The lifecycle for requests whose authorization has changed still needs approval, as does any policy to supersede a request when blockers appear after initiation.
+Migration `92f0cb15a83e` derives deadlines for existing requests from their original timestamps. Previously confirmed requests retain their original confirmation. If a legacy pending request is already overdue, it becomes eligible for finalization after upgrade. Downgrade is guarded once finalization history exists because the old schema cannot preserve that history.
 
-Resolving pending reviews in inactive clubs still needs a policy. Define retention and lifecycle rules for `CLOSED` and `ARCHIVED` years before implementing archiving, rollover, or reset.
+Run the worker from the application environment using the existing database settings.
+
+```sh
+python -m app.finalize_academic_years --limit 100 --batch-size 500
+```
+
+Each invocation takes one bounded batch from each selected overdue window and commits the batch before moving on. Repeated runs finish larger windows and safely retry interrupted work. Configure and test a recurring invocation in the production scheduler to process overdue reviews without an administrator request. Until then, backend writes still freeze at the deadline, and administrator confirmation can reconcile overdue reviews on demand.
