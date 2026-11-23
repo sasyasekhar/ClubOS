@@ -41,6 +41,7 @@ class ClubMembership(Base):
         PG_UUID(as_uuid=True),
         ForeignKey("clubs.id"),
         nullable=False,
+        index=True,
     )
 
     account_id: Mapped[uuid.UUID] = mapped_column(

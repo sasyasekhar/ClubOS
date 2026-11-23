@@ -7,6 +7,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     UniqueConstraint,
     Enum as SAEnum,
     func,
@@ -38,8 +39,7 @@ class Club(Base):
             "id",
             name="uq_clubs_school_id_id",
         ),
- 
-
+        Index("ix_clubs_school_academic_year", "school_id", "academic_year_id", "id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -102,4 +102,3 @@ class Club(Base):
         onupdate=func.now(),
         nullable=False,
     )
-   

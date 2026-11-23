@@ -29,7 +29,8 @@ class ClubReview(Base):
     club_id = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("clubs.id"),
-        nullable=False
+        nullable=False,
+        index=True,
     )
 
     admin_account_id = mapped_column(
@@ -53,4 +54,3 @@ class ClubReview(Base):
         server_default=func.now(),
         nullable=False,
     )
-    

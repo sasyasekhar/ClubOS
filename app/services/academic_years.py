@@ -29,7 +29,7 @@ class AcademicYearError(Exception):
         self.detail = detail
 
 
-def _require_admin_school(db: Session, admin: Account, *, for_update: bool = False) -> UUID:
+def require_admin_school(db: Session, admin: Account, *, for_update: bool = False) -> UUID:
     if (
         admin.account_type != AccountType.SCHOOL_ADMIN
         or not admin.is_active
@@ -58,7 +58,7 @@ def _require_admin_school(db: Session, admin: Account, *, for_update: bool = Fal
 
 
 def list_academic_years(db: Session, admin: Account) -> list[AcademicYearResponse]:
-    school_id = _require_admin_school(db, admin)
+    school_id = require_admin_school(db, admin)
     years = db.scalars(
         select(AcademicYear)
         .where(AcademicYear.school_id == school_id)
@@ -74,7 +74,7 @@ def create_academic_year(
     idempotency_key: UUID,
 ) -> AcademicYearResponse:
     try:
-        school_id = _require_admin_school(db, admin, for_update=True)
+        school_id = require_admin_school(db, admin, for_update=True)
         year_id = uuid5(NAMESPACE_URL, f"clubos:academic-year:{school_id}:{idempotency_key}")
         existing = db.scalar(
             select(AcademicYear).where(

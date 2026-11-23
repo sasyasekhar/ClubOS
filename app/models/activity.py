@@ -27,7 +27,8 @@ class Activity(Base):
     club_id = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("clubs.id"),
-        nullable=False
+        nullable=False,
+        index=True,
     )
 
     created_by = mapped_column(
@@ -47,4 +48,3 @@ class Activity(Base):
         onupdate=func.now(),
         nullable=False,
     )
-    
