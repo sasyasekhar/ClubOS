@@ -19,22 +19,28 @@ from app.models.activity_revision import ActivityRevision
 from app.models.audit_log import AuditLog
 from app.models.club import Club
 from app.models.club_membership import ClubMembership
+from app.models.club_review import ClubReview
 from app.models.enums import (
     AcademicYearStatus,
     AccountType,
     ActivityReviewDecision,
     ActivityRevisionStatus,
+    ClubReviewDecision,
     ClubRole,
     ClubStatus,
     MembershipStatus,
 )
 from app.models.school import School
+from app.models.school_admin import SchoolAdmin
 from app.schemas.activity import ActivityReviewRequest
-from app.schemas.club import ClubRegistrationRequest
+from app.schemas.club import ClubRegistrationRequest, ClubReviewRequest
 from app.services.activity_drafts import ActivityError
 from app.services.activity_review import review_activity
 from app.services.activity_workflow import submit_activity_draft
 from app.services.club_registration import ClubRequestError, register_club
+from app.services.club_review import review_club
+from app.services.representative_memberships import end_representative
+from app.services.teacher_invitation import respond_to_invitation
 
 
 WAIT_SECONDS = 8
@@ -54,9 +60,11 @@ class Scenario:
     historical_year_id: UUID
     student_id: UUID
     teacher_id: UUID
+    admin_id: UUID
     outsider_id: UUID
     first: ActivityTarget
     second: ActivityTarget
+    other_school: ActivityTarget
 
 
 @pytest.fixture
@@ -72,7 +80,7 @@ def scenario():
         db.add_all([school, other_school])
         db.flush()
         school_ids = (school.id, other_school.id)
-        student, teacher, outsider = actors = [
+        student, teacher, admin, outsider = actors = [
             Account(
                 school_id=school_id,
                 account_type=role,
@@ -84,38 +92,50 @@ def scenario():
             for name, role, school_id in (
                 ("student", AccountType.STUDENT, school.id),
                 ("teacher", AccountType.TEACHER, school.id),
+                ("admin", AccountType.SCHOOL_ADMIN, school.id),
                 ("outsider", AccountType.STUDENT, other_school.id),
             )
         ]
-        year, historical_year = years = [
+        year, historical_year, other_year = years = [
             AcademicYear(
-                school_id=school.id,
+                school_id=school_id,
                 name=status.value,
                 start_date=today - timedelta(days=30),
                 end_date=today + timedelta(days=30),
                 status=status,
             )
-            for status in (AcademicYearStatus.ACTIVE, AcademicYearStatus.CLOSED)
+            for school_id, status in (
+                (school.id, AcademicYearStatus.ACTIVE),
+                (school.id, AcademicYearStatus.CLOSED),
+                (other_school.id, AcademicYearStatus.ACTIVE),
+            )
         ]
         db.add_all([*actors, *years])
         db.flush()
+        db.add(SchoolAdmin(school_id=school.id, account_id=admin.id))
 
         targets = []
-        for name in ("First Club", "Second Club"):
+        for name, club_year, creator in (
+            ("First Club", year, student),
+            ("Second Club", year, student),
+            ("Other Club", other_year, outsider),
+        ):
             club = Club(
-                school_id=school.id, academic_year_id=year.id, created_by=student.id,
+                school_id=club_year.school_id, academic_year_id=club_year.id, created_by=creator.id,
                 name=name, category="STEM", status=ClubStatus.ACTIVE,
             )
             db.add(club)
             db.flush()
-            db.add_all([
-                ClubMembership(
-                    club_id=club.id, account_id=member.id, role=role,
+            db.add(ClubMembership(
+                club_id=club.id, account_id=creator.id, role=ClubRole.STUDENT_REP,
+                status=MembershipStatus.ACTIVE, start_date=today,
+            ))
+            if club_year.id == year.id:
+                db.add(ClubMembership(
+                    club_id=club.id, account_id=teacher.id, role=ClubRole.TEACHER_REP,
                     status=MembershipStatus.ACTIVE, start_date=today,
-                )
-                for member, role in ((student, ClubRole.STUDENT_REP), (teacher, ClubRole.TEACHER_REP))
-            ])
-            activity = Activity(club_id=club.id, created_by=student.id)
+                ))
+            activity = Activity(club_id=club.id, created_by=creator.id)
             db.add(activity)
             db.flush()
             revision = ActivityRevision(
@@ -126,7 +146,7 @@ def scenario():
             db.flush()
             targets.append(ActivityTarget(club.id, activity.id, revision.id))
 
-        result = Scenario(school.id, year.id, historical_year.id, student.id, teacher.id, outsider.id, *targets)
+        result = Scenario(school.id, year.id, historical_year.id, student.id, teacher.id, admin.id, outsider.id, *targets)
 
     try:
         yield result
@@ -141,9 +161,11 @@ def scenario():
             db.execute(delete(ActivityReview).where(ActivityReview.revision_id.in_(revision_ids)))
             db.execute(delete(ActivityRevision).where(ActivityRevision.activity_id.in_(activity_ids)))
             db.execute(delete(Activity).where(Activity.club_id.in_(club_ids)))
+            db.execute(delete(ClubReview).where(ClubReview.club_id.in_(club_ids)))
             db.execute(delete(ClubMembership).where(ClubMembership.club_id.in_(club_ids)))
             db.execute(delete(Club).where(Club.school_id.in_(school_ids)))
             db.execute(delete(AcademicYear).where(AcademicYear.school_id.in_(school_ids)))
+            db.execute(delete(SchoolAdmin).where(SchoolAdmin.school_id.in_(school_ids)))
             db.execute(delete(Account).where(Account.school_id.in_(school_ids)))
             db.execute(delete(School).where(School.id.in_(school_ids)))
 
@@ -153,7 +175,9 @@ def prepare_transaction(db):
     return db.scalar(select(func.pg_backend_pid()))
 
 
-def run_writer(scenario, target, pids, *, operation="submit", release=None, actor_id=None, cache_year=False):
+def run_writer(
+    scenario, target, pids, *, operation="submit", release=None, actor_id=None, cache_year=False, review_key=None,
+):
     with SessionLocal() as db:
         pid = prepare_transaction(db)
         default_actor = scenario.student_id if operation == "submit" else scenario.teacher_id
@@ -175,7 +199,9 @@ def run_writer(scenario, target, pids, *, operation="submit", release=None, acto
         args = (db, actor, target.club_id, target.activity_id, target.revision_id)
         if operation == "submit":
             return submit_activity_draft(*args)
-        return review_activity(*args, ActivityReviewRequest(decision=ActivityReviewDecision.APPROVED), uuid4())
+        return review_activity(
+            *args, ActivityReviewRequest(decision=ActivityReviewDecision.APPROVED), review_key or uuid4(),
+        )
 
 
 def lock_year(db, scenario, *, nowait=False):
@@ -198,7 +224,7 @@ def wait_for_blocking(waiting_pid, holder_pid):
     pytest.fail(f"PostgreSQL backend {waiting_pid} did not wait for backend {holder_pid}")
 
 
-def pending_after_exclusive_lock(scenario, pids):
+def pending_after_exclusive_lock(scenario, pids, *, pause_after_check=None):
     # Test-only model of the future confirmation transaction and its fresh blocker read.
     with SessionLocal.begin() as db:
         pids.put(prepare_transaction(db))
@@ -215,6 +241,10 @@ def pending_after_exclusive_lock(scenario, pids):
         )
         if pending_count == 0:
             year.status = AcademicYearStatus.CLOSED
+        if pause_after_check is not None:
+            checked, release = pause_after_check
+            checked.set()
+            assert release.wait(timeout=WAIT_SECONDS)
         return pending_count
 
 
@@ -233,6 +263,13 @@ def assert_revision_state(target, *, status, actions=(), reviews=0):
         assert revision.status == status
         assert db.scalars(select(AuditLog.action).where(AuditLog.entity_id == str(target.revision_id))).all() == list(actions)
         assert db.scalar(select(func.count(ActivityReview.id)).where(ActivityReview.revision_id == target.revision_id)) == reviews
+
+
+def mark_revision_pending(target):
+    with SessionLocal.begin() as db:
+        revision = db.get(ActivityRevision, target.revision_id)
+        revision.status = ActivityRevisionStatus.PENDING
+        revision.submitted_at = datetime.now(timezone.utc)
 
 
 def test_submissions_in_different_clubs_can_hold_the_same_year_lock(scenario):
@@ -265,10 +302,7 @@ def test_submissions_in_different_clubs_can_hold_the_same_year_lock(scenario):
 @pytest.mark.parametrize("operation", ["submit", "review"])
 def test_exclusive_year_lock_waits_for_writers_and_reads_committed_blockers(scenario, operation):
     if operation == "review":
-        with SessionLocal.begin() as db:
-            revision = db.get(ActivityRevision, scenario.first.revision_id)
-            revision.status = ActivityRevisionStatus.PENDING
-            revision.submitted_at = datetime.now(timezone.utc)
+        mark_revision_pending(scenario.first)
 
     writer_pids, closer_pids = Queue(), Queue()
     release = Event()
@@ -300,6 +334,52 @@ def test_exclusive_year_lock_waits_for_writers_and_reads_committed_blockers(scen
     with SessionLocal() as db:
         assert db.get(AcademicYear, scenario.year_id).status == expected_year
     assert_no_open_transactions(writer_pid, closer_pid)
+
+
+def test_last_review_allows_closure_before_a_later_submission(scenario):
+    mark_revision_pending(scenario.first)
+    review_key = uuid4()
+    review_pids, closure_pids, submission_pids = Queue(), Queue(), Queue()
+    commit_review, closure_checked, commit_closure = Event(), Event(), Event()
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        try:
+            review = executor.submit(
+                run_writer, scenario, scenario.first, review_pids,
+                operation="review", release=commit_review, review_key=review_key,
+            )
+            review_pid = review_pids.get(timeout=WAIT_SECONDS)
+            closer = executor.submit(
+                pending_after_exclusive_lock, scenario, closure_pids,
+                pause_after_check=(closure_checked, commit_closure),
+            )
+            closer_pid = closure_pids.get(timeout=WAIT_SECONDS)
+            wait_for_blocking(closer_pid, review_pid)
+
+            commit_review.set()
+            assert closure_checked.wait(timeout=WAIT_SECONDS)
+            submission = executor.submit(run_writer, scenario, scenario.second, submission_pids)
+            submission_pid = submission_pids.get(timeout=WAIT_SECONDS)
+            wait_for_blocking(submission_pid, closer_pid)
+        finally:
+            commit_review.set()
+            commit_closure.set()
+
+        assert review.result(timeout=WAIT_SECONDS)["status"] == ActivityRevisionStatus.APPROVED
+        assert closer.result(timeout=WAIT_SECONDS) == 0
+        with pytest.raises(ActivityError) as exc:
+            submission.result(timeout=WAIT_SECONDS)
+        assert (exc.value.status_code, exc.value.detail) == (409, "Academic year is not active.")
+
+    with pytest.raises(ActivityError) as exc:
+        run_writer(scenario, scenario.first, Queue(), operation="review", review_key=review_key)
+    assert (exc.value.status_code, exc.value.detail) == (409, "Academic year is not active.")
+    with SessionLocal() as db:
+        assert db.get(AcademicYear, scenario.year_id).status == AcademicYearStatus.CLOSED
+    assert_revision_state(
+        scenario.first, status=ActivityRevisionStatus.APPROVED, actions=("ACTIVITY_REVIEWED",), reviews=1,
+    )
+    assert_revision_state(scenario.second, status=ActivityRevisionStatus.DRAFT)
+    assert_no_open_transactions(review_pid, closer_pid, submission_pid)
 
 
 @pytest.mark.parametrize("operation", ["submit", "review"])
@@ -346,7 +426,7 @@ def test_writer_revalidates_the_clubs_year_after_acquiring_the_lock(scenario):
     assert_no_open_transactions(writer_pid, moving_pid)
 
 
-def test_foreign_writer_is_rejected_without_waiting_on_the_year(scenario):
+def test_exclusive_year_lock_stays_within_the_school(scenario):
     pids = Queue()
     with ThreadPoolExecutor(max_workers=1) as executor:
         with SessionLocal.begin() as owner:
@@ -358,9 +438,19 @@ def test_foreign_writer_is_rejected_without_waiting_on_the_year(scenario):
             with pytest.raises(ActivityError) as exc:
                 writer.result(timeout=WAIT_SECONDS)
 
+            own_school_write = executor.submit(
+                run_writer, scenario, scenario.other_school, pids, actor_id=scenario.outsider_id,
+            )
+            other_pid = pids.get(timeout=WAIT_SECONDS)
+            assert other_pid != owner_pid
+            assert own_school_write.result(timeout=WAIT_SECONDS)["status"] == ActivityRevisionStatus.PENDING
+
     assert (exc.value.status_code, exc.value.detail) == (404, "Club not found.")
     assert_revision_state(scenario.first, status=ActivityRevisionStatus.DRAFT)
-    assert_no_open_transactions(writer_pid, owner_pid)
+    assert_revision_state(
+        scenario.other_school, status=ActivityRevisionStatus.PENDING, actions=("ACTIVITY_SUBMITTED",),
+    )
+    assert_no_open_transactions(writer_pid, other_pid, owner_pid)
 
 
 def test_club_registration_rechecks_active_year_and_preserves_replay(scenario):
@@ -404,3 +494,62 @@ def test_club_registration_rechecks_active_year_and_preserves_replay(scenario):
         )).all()
         assert audits == [str(original["id"])]
     assert_no_open_transactions(writer_pid, closer_pid)
+
+
+@pytest.mark.parametrize("operation", ["reject_club", "accept_invitation", "end_representative"])
+def test_club_writes_wait_for_year_and_reject_after_closure(scenario, operation):
+    club_id = scenario.first.club_id
+    club_status = ClubStatus.PENDING if operation == "reject_club" else ClubStatus.ACTIVE
+    membership_status = MembershipStatus.PENDING if operation == "accept_invitation" else MembershipStatus.ACTIVE
+    with SessionLocal.begin() as db:
+        db.get(Club, club_id).status = club_status
+        membership = db.scalars(select(ClubMembership).where(
+            ClubMembership.club_id == club_id,
+            ClubMembership.account_id == scenario.teacher_id,
+        )).one()
+        membership.status = membership_status
+        membership_id = membership.id
+
+    pids = Queue()
+
+    def write():
+        with SessionLocal() as db:
+            pids.put(prepare_transaction(db))
+            if operation == "accept_invitation":
+                return respond_to_invitation(db, db.get(Account, scenario.teacher_id), club_id, "ACCEPT")
+            admin = db.get(Account, scenario.admin_id)
+            if operation == "reject_club":
+                return review_club(
+                    db, admin, club_id,
+                    ClubReviewRequest(decision=ClubReviewDecision.REJECTED, comments="Needs more detail."), uuid4(),
+                )
+            return end_representative(db, admin, club_id, membership_id, uuid4(), reason=None)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with SessionLocal.begin() as closing:
+            closer_pid = prepare_transaction(closing)
+            year = lock_year(closing, scenario)
+            writer = executor.submit(write)
+            writer_pid = pids.get(timeout=WAIT_SECONDS)
+            wait_for_blocking(writer_pid, closer_pid)
+            with SessionLocal() as probe:
+                probe.scalars(select(Club.id).where(Club.id == club_id).with_for_update(nowait=True)).one()
+            year.status = AcademicYearStatus.CLOSED
+
+        with pytest.raises(ClubRequestError) as exc:
+            writer.result(timeout=WAIT_SECONDS)
+    assert (exc.value.status_code, exc.value.detail) == (409, "Academic year is not active.")
+
+    with pytest.raises(ClubRequestError) as exc:
+        write()
+    assert (exc.value.status_code, exc.value.detail) == (409, "Academic year is not active.")
+    with SessionLocal() as db:
+        assert db.get(Club, club_id).status == club_status
+        membership = db.get(ClubMembership, membership_id)
+        assert membership.status == membership_status
+        assert membership.end_date is None
+        assert not db.scalars(select(ClubReview.id).where(ClubReview.club_id == club_id)).all()
+        assert not db.scalars(select(AuditLog.id).where(
+            AuditLog.actor_account_id.in_((scenario.admin_id, scenario.teacher_id)),
+        )).all()
+    assert_no_open_transactions(writer_pid, closer_pid, pids.get_nowait())
