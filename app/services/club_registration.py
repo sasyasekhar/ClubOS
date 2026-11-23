@@ -7,19 +7,18 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.account import Account
-from app.models.academic_year import AcademicYear
 from app.models.audit_log import AuditLog
 from app.models.club import Club
 from app.models.club_membership import ClubMembership
 from app.models.school import School
 from app.models.enums import (
     AccountType,
-    AcademicYearStatus,
     ClubStatus,
     ClubRole,
     MembershipStatus,
 )
 from app.schemas.club import ClubRegistrationRequest
+from app.services.academic_year_write_guard import lock_academic_year_for_write
 
 
 class ClubRequestError(Exception):
@@ -87,21 +86,26 @@ def register_club(
         f"clubos:club-registration:{student.id}:{idempotency_key}",
     )
 
-    existing = db.get(Club, club_id)
+    existing_query = select(Club).where(Club.id == club_id, Club.school_id == student.school_id)
+    existing = db.scalar(existing_query)
     if existing is not None:
         return existing_request(db, existing, student, data)
 
-    school = db.get(School, student.school_id)
-    if school is None or not school.is_active:
+    # Take the club's school foreign-key lock before the year lock.
+    school_active = db.scalar(
+        select(School.is_active)
+        .where(School.id == student.school_id)
+        .with_for_update(read=True, key_share=True, of=School)
+    )
+    if not school_active:
         raise ClubRequestError(403, "School is inactive.")
 
-    year = db.scalar(
-        select(AcademicYear).where(
-            AcademicYear.school_id == student.school_id,
-            AcademicYear.status == AcademicYearStatus.ACTIVE,
-        )
-    )
+    year = lock_academic_year_for_write(db, student.school_id)
     if year is None:
+        # A concurrent request may have committed before the year closed.
+        existing = db.scalar(existing_query)
+        if existing is not None:
+            return existing_request(db, existing, student, data)
         raise ClubRequestError(
             409, "An active academic year is required."
         )
@@ -155,7 +159,7 @@ def register_club(
         db.rollback()
 
         # Another request may have committed the same ID.
-        existing = db.get(Club, club_id)
+        existing = db.scalar(existing_query)
         if existing is not None:
             return existing_request(db, existing, student, data)
 

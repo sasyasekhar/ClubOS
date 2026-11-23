@@ -9,8 +9,6 @@ from sqlalchemy.orm import Session
 from app.models.account import Account
 from app.models.school import School
 from app.models.school_admin import SchoolAdmin
-from app.models.academic_year import AcademicYear
-from app.models.club import Club
 from app.models.club_membership import ClubMembership
 from app.models.audit_log import AuditLog
 from app.models.enums import (
@@ -20,6 +18,7 @@ from app.models.enums import (
     ClubStatus,
     MembershipStatus,
 )
+from app.services.academic_year_write_guard import lock_club_for_year_write
 from app.services.club_registration import ClubRequestError
 
 
@@ -54,19 +53,11 @@ def lock_admin_club(db: Session, admin: Account, club_id: UUID):
     ):
         raise ClubRequestError(403, "Permission denied.")
 
-    club = db.scalar(
-        select(Club)
-        .where(
-            Club.id == club_id,
-            Club.school_id == admin.school_id,
-        )
-        .with_for_update()
-    )
-
-    if club is None:
+    locked = lock_club_for_year_write(db, admin.school_id, club_id)
+    if locked is None:
         raise ClubRequestError(404, "Club not found.")
 
-    return club
+    return locked
 
 
 def end_representative(
@@ -77,7 +68,7 @@ def end_representative(
     key: UUID,
     reason: str | None,
 ):
-    club = lock_admin_club(db, admin, club_id)
+    club, year = lock_admin_club(db, admin, club_id)
 
     membership = db.get(ClubMembership, membership_id)
 
@@ -113,6 +104,9 @@ def end_representative(
     ):
         raise ClubRequestError(403, "Invalid representative role.")
 
+    if year.status != AcademicYearStatus.ACTIVE:
+        raise ClubRequestError(409, "Academic year is not active.")
+
     try:
         membership.status = MembershipStatus.ENDED
         membership.end_date = datetime.now(timezone.utc).date()
@@ -145,7 +139,7 @@ def rejoin_representative(
     old_membership_id: UUID,
     key: UUID,
 ):
-    club = lock_admin_club(db, admin, club_id)
+    club, year = lock_admin_club(db, admin, club_id)
 
     old = db.get(ClubMembership, old_membership_id)
 
@@ -174,12 +168,7 @@ def rejoin_representative(
     ):
         raise ClubRequestError(409, "Membership cannot rejoin.")
 
-    year = db.get(AcademicYear, club.academic_year_id)
-    if (
-        year is None
-        or year.school_id != club.school_id
-        or year.status != AcademicYearStatus.ACTIVE
-    ):
+    if year.status != AcademicYearStatus.ACTIVE:
         raise ClubRequestError(409, "Academic year is not active.")
 
     account = db.get(Account, old.account_id)

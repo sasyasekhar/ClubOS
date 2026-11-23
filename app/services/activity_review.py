@@ -8,8 +8,6 @@ from sqlalchemy.orm import Session
 
 from app.models.account import Account
 from app.models.school import School
-from app.models.club import Club
-from app.models.academic_year import AcademicYear
 from app.models.club_membership import ClubMembership
 from app.models.activity import Activity
 from app.models.activity_revision import ActivityRevision
@@ -26,6 +24,7 @@ from app.models.enums import (
     ReviewMode,
 )
 from app.schemas.activity import ActivityReviewRequest
+from app.services.academic_year_write_guard import lock_club_for_year_write
 from app.services.activity_drafts import ActivityError
 
 
@@ -54,28 +53,19 @@ def review_activity(
         ):
             raise ActivityError(403, "Permission denied.")
 
-        # Consistent parent lock serializes reviews and activity edits.
-        club = db.scalar(
-            select(Club).where(
-                Club.id == club_id,
-                Club.school_id == teacher.school_id,
-            ).with_for_update()
-        )
-
-        if club is None:
+        locked = lock_club_for_year_write(db, teacher.school_id, club_id)
+        if locked is None:
             raise ActivityError(404, "Club not found.")
+        club, year = locked
 
         if club.status != ClubStatus.ACTIVE:
             raise ActivityError(409, "Club is not active.")
 
         school = db.get(School, club.school_id)
-        year = db.get(AcademicYear, club.academic_year_id)
 
         if (
             school is None
             or not school.is_active
-            or year is None
-            or year.school_id != club.school_id
             or year.status != AcademicYearStatus.ACTIVE
         ):
             raise ActivityError(409, "Academic year is not active.")
@@ -103,10 +93,13 @@ def review_activity(
             raise ActivityError(404, "Activity not found.")
 
         revision = db.scalar(
-            select(ActivityRevision).where(
+            select(ActivityRevision)
+            .where(
                 ActivityRevision.id == revision_id,
                 ActivityRevision.activity_id == activity.id,
-            ).with_for_update()
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
 
         if revision is None:
@@ -152,6 +145,7 @@ def review_activity(
                     ActivityRevision.is_published.is_(True),
                 )
                 .with_for_update()
+                .execution_options(populate_existing=True)
             )
 
             if previous is not None:

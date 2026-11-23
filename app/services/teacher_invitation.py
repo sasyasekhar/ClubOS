@@ -10,11 +10,13 @@ from app.models.club import Club
 from app.models.club_membership import ClubMembership
 from app.models.audit_log import AuditLog
 from app.models.enums import (
+    AcademicYearStatus,
     AccountType,
     ClubRole,
     ClubStatus,
     MembershipStatus,
 )
+from app.services.academic_year_write_guard import lock_club_for_year_write
 from app.services.club_registration import ClubRequestError
 
 
@@ -63,18 +65,10 @@ def respond_to_invitation(
 ):
     check_teacher(teacher)
 
-    # Serialize decisions for this club, including admin reviews.
-    club = db.scalar(
-        select(Club)
-        .where(
-            Club.id == club_id,
-            Club.school_id == teacher.school_id,
-        )
-        .with_for_update()
-    )
-
-    if club is None:
+    locked = lock_club_for_year_write(db, teacher.school_id, club_id)
+    if locked is None:
         raise ClubRequestError(404, "Invitation not found.")
+    club, year = locked
 
     membership = db.scalar(
         select(ClubMembership)
@@ -116,6 +110,9 @@ def respond_to_invitation(
 
     if membership.status != MembershipStatus.PENDING:
         raise ClubRequestError(409, "Invitation already resolved.")
+
+    if year.status != AcademicYearStatus.ACTIVE:
+        raise ClubRequestError(409, "Academic year is not active.")
 
     try:
         membership.status = target

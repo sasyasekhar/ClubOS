@@ -8,8 +8,6 @@ from sqlalchemy.orm import Session
 
 from app.models.account import Account
 from app.models.school import School
-from app.models.academic_year import AcademicYear
-from app.models.club import Club
 from app.models.club_membership import ClubMembership
 from app.models.audit_log import AuditLog
 from app.models.enums import (
@@ -20,6 +18,7 @@ from app.models.enums import (
     MembershipStatus,
 )
 from app.schemas.club import ClubRegistrationRequest
+from app.services.academic_year_write_guard import lock_club_for_year_write
 from app.services.club_registration import ClubRequestError
 
 
@@ -37,17 +36,12 @@ def resubmit_club(
     ):
         raise ClubRequestError(403, "Permission denied.")
 
-    # Serializes updates and reviews of the same club.
-    club = db.scalar(
-        select(Club).where(
-            Club.id == club_id,
-            Club.school_id == student.school_id,
-            Club.created_by == student.id,
-        ).with_for_update()
+    locked = lock_club_for_year_write(
+        db, student.school_id, club_id, creator_id=student.id
     )
-
-    if club is None:
+    if locked is None:
         raise ClubRequestError(404, "Club not found.")
+    club, year = locked
 
     event_id = uuid5(
         NAMESPACE_URL,
@@ -82,13 +76,9 @@ def resubmit_club(
         )
 
     school = db.get(School, student.school_id)
-    year = db.get(AcademicYear, club.academic_year_id)
-
     if (
         school is None
         or not school.is_active
-        or year is None
-        or year.school_id != student.school_id
         or year.status != AcademicYearStatus.ACTIVE
     ):
         raise ClubRequestError(

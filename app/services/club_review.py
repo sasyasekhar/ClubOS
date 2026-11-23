@@ -6,10 +6,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.account import Account
-from app.models.academic_year import AcademicYear
 from app.models.school import School
 from app.models.school_admin import SchoolAdmin
-from app.models.club import Club
 from app.models.club_review import ClubReview
 from app.models.club_membership import ClubMembership
 from app.models.audit_log import AuditLog
@@ -22,6 +20,7 @@ from app.models.enums import (
     MembershipStatus,
 )
 from app.schemas.club import ClubReviewRequest
+from app.services.academic_year_write_guard import lock_club_for_year_write
 from app.services.club_registration import ClubRequestError
 
 
@@ -47,27 +46,25 @@ def review_club(
     ):
         raise ClubRequestError(403, "Permission denied.")
 
-    admin_link = db.get(SchoolAdmin, admin.school_id)
+    # Take the review's school-admin foreign-key lock before the year lock.
+    admin_link = db.scalar(
+        select(SchoolAdmin.account_id)
+        .where(SchoolAdmin.school_id == admin.school_id, SchoolAdmin.account_id == admin.id)
+        .with_for_update(read=True, key_share=True, of=SchoolAdmin)
+    )
     school = db.get(School, admin.school_id)
 
     if (
         admin_link is None
-        or admin_link.account_id != admin.id
         or school is None
         or not school.is_active
     ):
         raise ClubRequestError(403, "Permission denied.")
 
-    # Lock the club to serialize competing review requests.
-    club = db.scalar(
-        select(Club).where(
-            Club.id == club_id,
-            Club.school_id == admin.school_id,
-        ).with_for_update()
-    )
-
-    if club is None:
+    locked = lock_club_for_year_write(db, admin.school_id, club_id)
+    if locked is None:
         raise ClubRequestError(404, "Club not found.")
+    club, year = locked
 
     review_id = uuid5(
         NAMESPACE_URL,
@@ -98,12 +95,10 @@ def review_club(
         )
 
     if data.decision == ClubReviewDecision.APPROVED:
-        year = db.get(AcademicYear, club.academic_year_id)
         student = db.get(Account, club.created_by)
 
         if (
-            year is None
-            or year.status != AcademicYearStatus.ACTIVE
+            year.status != AcademicYearStatus.ACTIVE
             or student is None
             or student.school_id != club.school_id
             or student.account_type != AccountType.STUDENT
@@ -120,6 +115,8 @@ def review_club(
             status=MembershipStatus.ACTIVE,
             start_date=date.today(),
         ))
+    elif year.status != AcademicYearStatus.ACTIVE:
+        raise ClubRequestError(409, "Academic year is not active.")
 
     club.status = STATUS_MAP[data.decision]
 

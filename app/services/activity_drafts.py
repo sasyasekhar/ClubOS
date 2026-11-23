@@ -7,9 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.models.account import Account
 from app.models.school import School
-from app.models.club import Club
 from app.models.club_membership import ClubMembership
-from app.models.academic_year import AcademicYear
 from app.models.activity import Activity
 from app.models.activity_revision import ActivityRevision
 from app.models.audit_log import AuditLog
@@ -24,6 +22,7 @@ from app.models.enums import (
 )
 
 from app.schemas.activity import ActivityDraftCreate
+from app.services.academic_year_write_guard import lock_club_for_year_write
 
 
 class ActivityError(Exception):
@@ -47,16 +46,10 @@ def create_activity_draft(
     ):
         raise ActivityError(403, "Permission denied.")
 
-    # Lock the club to serialize concurrent creation requests.
-    club = db.scalar(
-        select(Club).where(
-            Club.id == club_id,
-            Club.school_id == student.school_id,
-        ).with_for_update()
-    )
-
-    if club is None:
+    locked = lock_club_for_year_write(db, student.school_id, club_id)
+    if locked is None:
         raise ActivityError(404, "Club not found.")
+    club, year = locked
 
     unique = f"{student.id}:{club_id}:{idempotency_key}"
 
@@ -97,13 +90,10 @@ def create_activity_draft(
         raise ActivityError(409, "Club is not active.")
 
     school = db.get(School, student.school_id)
-    year = db.get(AcademicYear, club.academic_year_id)
 
     if (
         school is None
         or not school.is_active
-        or year is None
-        or year.school_id != student.school_id
         or year.status != AcademicYearStatus.ACTIVE
     ):
         raise ActivityError(
