@@ -10,8 +10,9 @@ from sqlalchemy.orm import Session
 from app.config.database import get_db
 from app.models.account import Account
 from app.models.enums import AccountType
-from app.schemas.academic_year import AcademicYearCreate, AcademicYearResponse
+from app.schemas.academic_year import AcademicYearClosureReadiness, AcademicYearCreate, AcademicYearResponse
 from app.security.permissions import require_roles
+from app.services.academic_year_closure import check_closure_readiness
 from app.services.academic_year_exports import EXPORT_COOLDOWN_SECONDS, open_academic_year_export
 from app.services.academic_years import (
     AcademicYearError,
@@ -49,6 +50,22 @@ def get_academic_years(
         return list_academic_years(db, admin)
     except AcademicYearError as exc:
         raise HTTPException(exc.status_code, exc.detail) from exc
+
+
+@router.get("/{year_id}/closure-readiness")
+def get_closure_readiness(
+    year_id: UUID,
+    response: Response,
+    admin: Account = Depends(require_school_admin),
+    db: Session = Depends(get_db),
+) -> AcademicYearClosureReadiness:
+    response.headers["Cache-Control"] = "private, no-store"
+    try:
+        return check_closure_readiness(db, admin, year_id)
+    except AcademicYearError as exc:
+        raise HTTPException(
+            exc.status_code, exc.detail, headers={"Cache-Control": "private, no-store"}
+        ) from exc
 
 
 def _export_archive(

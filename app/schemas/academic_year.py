@@ -47,3 +47,26 @@ class AcademicYearResponse(BaseModel):
     end_date: date
     status: AcademicYearStatus
     created_at: datetime
+
+
+class ActivityRevisionCounts(BaseModel):
+    PENDING: int
+    DRAFT: int
+    CHANGES_REQUESTED: int
+    APPROVED: int
+    REJECTED: int
+
+
+class PendingReviewBlocker(BaseModel):
+    club_id: UUID
+    activity_id: UUID
+    revision_id: UUID
+
+
+class AcademicYearClosureReadiness(BaseModel):
+    academic_year_id: UUID
+    status: AcademicYearStatus
+    counts: ActivityRevisionCounts
+    can_close: bool
+    pending_review_blocker_count: int
+    pending_review_blockers: list[PendingReviewBlocker]
