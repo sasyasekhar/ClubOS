@@ -1,8 +1,6 @@
 
-from datetime import datetime, timezone
 from uuid import UUID, NAMESPACE_URL, uuid5
 
-from alembic.command import revision
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -15,7 +13,6 @@ from app.models.activity_review import ActivityReview
 from app.models.audit_log import AuditLog
 from app.models.enums import (
     AccountType,
-    AcademicYearStatus,
     ClubRole,
     ClubStatus,
     MembershipStatus,
@@ -24,8 +21,8 @@ from app.models.enums import (
     ReviewMode,
 )
 from app.schemas.activity import ActivityReviewRequest
-from app.services.academic_year_write_guard import lock_club_for_year_write
-from app.services.activity_drafts import ActivityError
+from app.services.academic_year_write_guard import lock_club_for_year_write, require_completion_window_open
+from app.services.activity_drafts import ActivityError, require_active_activity_year
 
 
 STATUS_MAP = {
@@ -63,11 +60,7 @@ def review_activity(
 
         school = db.get(School, club.school_id)
 
-        if (
-            school is None
-            or not school.is_active
-            or year.status != AcademicYearStatus.ACTIVE
-        ):
+        if school is None or not school.is_active:
             raise ActivityError(409, "Academic year is not active.")
 
         assigned = db.scalar(
@@ -105,6 +98,7 @@ def review_activity(
         if revision is None:
             raise ActivityError(404, "Revision not found.")
 
+        require_active_activity_year(db, year)
         review_id = uuid5(
             NAMESPACE_URL,
             f"clubos:activity-review:{teacher.id}:"
@@ -132,12 +126,8 @@ def review_activity(
                 "status": STATUS_MAP[existing.decision],
             }
 
-        if revision.status != ActivityRevisionStatus.PENDING:
-            raise ActivityError(
-                409, "Revision is not awaiting review."
-            )
-
-        if data.decision == ActivityReviewDecision.APPROVED:
+        previous = None
+        if revision.status == ActivityRevisionStatus.PENDING and data.decision == ActivityReviewDecision.APPROVED:
             previous = db.scalar(
                 select(ActivityRevision)
                 .where(
@@ -148,10 +138,14 @@ def review_activity(
                 .execution_options(populate_existing=True)
             )
 
-            if previous is not None:
-                previous.is_published = False
-                previous.superseded_at = datetime.now(timezone.utc)
-                db.flush()
+        reviewed_at = require_completion_window_open(db, year, ActivityError)
+        if revision.status != ActivityRevisionStatus.PENDING:
+            raise ActivityError(409, "Revision is not awaiting review.")
+
+        if previous is not None:
+            previous.is_published = False
+            previous.superseded_at = reviewed_at
+            db.flush()
 
         revision.status = STATUS_MAP[data.decision]
         revision.is_published = (
@@ -168,6 +162,7 @@ def review_activity(
             review_mode=ReviewMode.DIRECT,
             decision=data.decision,
             comments=data.comments,
+            reviewed_at=reviewed_at,
         )
 
         audit = AuditLog(

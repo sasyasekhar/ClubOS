@@ -1,11 +1,23 @@
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timezone
+from enum import Enum
 from typing import Annotated, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator, model_validator
+from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, StringConstraints, field_validator, model_validator
 
 from app.models.enums import AcademicYearStatus, ClosureRequestStatus
+
+
+UtcTimestamp = Annotated[AwareDatetime, AfterValidator(lambda value: value.astimezone(timezone.utc))]
+
+
+class ClosureWindowStatus(str, Enum):
+    NOT_REQUESTED = "NOT_REQUESTED"
+    OPEN = "OPEN"
+    EXPIRED = "EXPIRED"
+    FINALIZED = "FINALIZED"
+    CONFIRMED = "CONFIRMED"
 
 
 class AcademicYearCreate(BaseModel):
@@ -70,6 +82,14 @@ class AcademicYearClosureReadiness(BaseModel):
     can_close: bool
     pending_review_blocker_count: int
     pending_review_blockers: list[PendingReviewBlocker]
+    pending_review_attention_count: int
+    auto_rejected_count: int
+    closure_request_id: UUID | None
+    completion_deadline_at: UtcTimestamp | None
+    finalized_at: UtcTimestamp | None
+    window_status: ClosureWindowStatus
+    can_initiate: bool
+    can_confirm: bool
 
 
 class ClosureTeacherDesignation(BaseModel):
@@ -88,10 +108,13 @@ class ClosureRequestResponse(BaseModel):
     id: UUID
     academic_year_id: UUID
     teacher_account_id: UUID
-    requested_at: datetime
+    requested_at: UtcTimestamp
+    completion_deadline_at: UtcTimestamp
+    finalized_at: UtcTimestamp | None
+    window_status: ClosureWindowStatus
     status: ClosureRequestStatus
     confirmed_by_account_id: UUID | None
-    confirmed_at: datetime | None
+    confirmed_at: UtcTimestamp | None
 
 
 class ClosureConfirmation(BaseModel):

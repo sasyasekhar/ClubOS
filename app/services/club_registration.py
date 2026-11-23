@@ -18,11 +18,11 @@ from app.models.enums import (
     MembershipStatus,
 )
 from app.schemas.club import ClubRegistrationRequest
-from app.services.academic_year_write_guard import lock_academic_year_for_write
+from app.services.academic_year_write_guard import lock_academic_year_for_write, require_completion_window_open
 
 
 class ClubRequestError(Exception):
-    def __init__(self, status_code: int, detail: str):
+    def __init__(self, status_code: int, detail: str | dict[str, str]):
         self.status_code = status_code
         self.detail = detail
         super().__init__(detail)
@@ -153,6 +153,7 @@ def register_club(
     )
 
     try:
+        require_completion_window_open(db, year, ClubRequestError)
         db.add_all([club, membership, audit])
         db.commit()
     except IntegrityError as exc:

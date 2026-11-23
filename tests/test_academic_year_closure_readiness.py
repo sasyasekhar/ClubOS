@@ -159,22 +159,30 @@ def blocker(club, revision):
     return {"club_id": str(club.id), "activity_id": str(revision.activity_id), "revision_id": str(revision.id)}
 
 
-def assert_readiness(response, year, expected_counts, blockers, *, can_close):
+def assert_readiness(response, year, expected_counts, blockers):
     assert response.status_code == 200, response.text
     assert response.headers["Cache-Control"] == "private, no-store"
     assert response.json() == {
         "academic_year_id": str(year.id),
         "status": year.status.value,
         "counts": expected_counts,
-        "can_close": can_close,
+        "can_close": False,
         "pending_review_blocker_count": expected_counts["PENDING"],
         "pending_review_blockers": blockers,
+        "pending_review_attention_count": expected_counts["PENDING"],
+        "auto_rejected_count": 0,
+        "closure_request_id": None,
+        "completion_deadline_at": None,
+        "finalized_at": None,
+        "window_status": "NOT_REQUESTED",
+        "can_initiate": year.status == AcademicYearStatus.ACTIVE,
+        "can_confirm": False,
     }
 
 
 @pytest.mark.parametrize("year", ["active", "closed", "archived"])
 def test_readiness_of_an_empty_year(scenario, year):
-    assert_readiness(scenario.readiness(year=year), scenario.years[year], counts(), [], can_close=year == "active")
+    assert_readiness(scenario.readiness(year=year), scenario.years[year], counts(), [])
 
 
 def test_resolved_revisions_count_once_with_multiple_review_rows(scenario):
@@ -195,16 +203,16 @@ def test_resolved_revisions_count_once_with_multiple_review_rows(scenario):
         )
     ])
     assert_readiness(
-        scenario.readiness(), scenario.years["active"], counts(APPROVED=1, REJECTED=1), [], can_close=True,
+        scenario.readiness(), scenario.years["active"], counts(APPROVED=1, REJECTED=1), [],
     )
 
 
 @pytest.mark.parametrize("club_status", [ClubStatus.ACTIVE, ClubStatus.ARCHIVED])
-def test_pending_review_blocks_even_when_the_club_is_inactive(scenario, club_status):
+def test_pending_review_is_counted_even_when_the_club_is_inactive(scenario, club_status):
     club = scenario.add_club(status=club_status)
     pending, = scenario.add_revisions(club, ActivityRevisionStatus.PENDING)
     assert_readiness(
-        scenario.readiness(), scenario.years["active"], counts(PENDING=1), [blocker(club, pending)], can_close=False,
+        scenario.readiness(), scenario.years["active"], counts(PENDING=1), [blocker(club, pending)],
     )
 
 
@@ -218,15 +226,14 @@ def test_mixed_revisions_across_clubs_keep_their_own_status_counts(scenario):
     blockers = sorted([blocker(first, pending), blocker(second, another_pending)], key=lambda row: row["revision_id"])
     assert_readiness(
         scenario.readiness(), scenario.years["active"], counts(PENDING=2, DRAFT=2, CHANGES_REQUESTED=1), blockers,
-        can_close=False,
     )
 
 
-def test_unfinished_revisions_do_not_block_closure_on_their_own(scenario):
+def test_readiness_distinguishes_unfinished_revisions_from_pending_reviews(scenario):
     club = scenario.add_club()
     scenario.add_revisions(club, ActivityRevisionStatus.DRAFT, ActivityRevisionStatus.CHANGES_REQUESTED)
     assert_readiness(
-        scenario.readiness(), scenario.years["active"], counts(DRAFT=1, CHANGES_REQUESTED=1), [], can_close=True,
+        scenario.readiness(), scenario.years["active"], counts(DRAFT=1, CHANGES_REQUESTED=1), [],
     )
 
 
@@ -239,7 +246,7 @@ def test_readiness_uses_only_the_requested_year_in_the_admins_school(scenario):
 
     school_override = {"school_id": str(scenario.years["other"].school_id)}
     assert_readiness(
-        scenario.readiness(params=school_override), scenario.years["active"], counts(APPROVED=1), [], can_close=True,
+        scenario.readiness(params=school_override), scenario.years["active"], counts(APPROVED=1), [],
     )
     foreign = scenario.readiness(year="other", params=school_override)
     missing = scenario.readiness(year=uuid4())
@@ -295,7 +302,6 @@ def test_readiness_leaves_records_and_audit_history_intact(scenario):
     for _ in range(2):
         assert_readiness(
             scenario.readiness(), scenario.years["active"], counts(APPROVED=1, PENDING=1), [blocker(club, pending)],
-            can_close=False,
         )
     assert snapshot() == before
 
@@ -346,7 +352,6 @@ def test_large_year_uses_one_data_query_and_a_bounded_blocker_list(scenario):
 
     assert_readiness(
         response, scenario.years["active"], dict.fromkeys(counts(), len(pending_revisions)), expected_blockers,
-        can_close=False,
     )
     (query, returned_rows), = data_queries
     assert "LIMIT" in query.upper()
@@ -371,4 +376,4 @@ def test_database_failure_returns_a_private_retriable_error(scenario, caplog):
     assert response.json() == {"detail": "Closure readiness is temporarily unavailable."}
     assert response.headers["Cache-Control"] == "private, no-store"
     assert private_detail not in caplog.text
-    assert_readiness(scenario.readiness(), scenario.years["active"], counts(), [], can_close=True)
+    assert_readiness(scenario.readiness(), scenario.years["active"], counts(), [])

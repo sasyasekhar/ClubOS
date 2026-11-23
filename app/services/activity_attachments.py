@@ -17,13 +17,15 @@ from app.models.club import Club
 from app.models.club_membership import ClubMembership
 from app.models.enums import AccountType, ClubRole, MembershipStatus
 from app.schemas.activity import ActivityAttachmentResponse
+from app.services.academic_year_write_guard import require_completion_window_open
 from app.services.activity_drafts import ActivityError
+from app.services.activity_workflow import authorized_revision
 from app.services.attachment_policy import (
     ALLOWED_TYPES,
     MAX_FILE_SIZE,
     AttachmentValidationError,
-    ensure_upload_allowed,
     is_safe_filename,
+    require_uploadable_revision,
     validate_attachment,
 )
 from app.services.storage import AttachmentStorage, ObjectMissing, StorageError
@@ -71,7 +73,8 @@ def upload_attachment(
 ) -> ActivityAttachmentResponse:
     storage_key_to_remove = None
     try:
-        ensure_upload_allowed(db, student, club_id, activity_id, revision_id)
+        revision, year = authorized_revision(db, student, club_id, activity_id, revision_id)
+        require_uploadable_revision(revision)
         content = file.read(MAX_FILE_SIZE + 1)
         if len(content) > MAX_FILE_SIZE:
             raise ActivityError(413, "Attachment exceeds 10 MiB.")
@@ -97,6 +100,7 @@ def upload_attachment(
             db.rollback()
             return result
 
+        require_completion_window_open(db, year, ActivityError)
         validated = validate_attachment(filename, content_type, content)
         attachment_id = uuid4()
         attachment = ActivityAttachment(

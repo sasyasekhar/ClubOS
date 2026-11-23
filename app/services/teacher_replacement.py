@@ -13,7 +13,7 @@ from app.models.enums import (
     AccountType, AcademicYearStatus,
     ClubRole, ClubStatus, MembershipStatus,
 )
-from app.services.academic_year_write_guard import lock_club_for_year_write
+from app.services.academic_year_write_guard import lock_club_for_year_write, require_completion_window_open
 from app.services.club_registration import ClubRequestError
 
 
@@ -146,6 +146,7 @@ def replace_declined_teacher(
     )
 
     try:
+        require_completion_window_open(db, year, ClubRequestError)
         db.add_all([membership, audit])
         db.commit()
     except Exception:

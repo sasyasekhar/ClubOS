@@ -14,6 +14,7 @@ from app.models.club_membership import ClubMembership
 from app.models.activity import Activity
 from app.models.activity_revision import ActivityRevision
 from app.models.activity_attachment import ActivityAttachment
+from app.models.activity_deadline_rejection import ActivityDeadlineRejection
 from app.models.activity_review import ActivityReview
 
 from app.models.login_history import LoginHistory

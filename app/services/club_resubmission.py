@@ -18,7 +18,7 @@ from app.models.enums import (
     MembershipStatus,
 )
 from app.schemas.club import ClubRegistrationRequest
-from app.services.academic_year_write_guard import lock_club_for_year_write
+from app.services.academic_year_write_guard import lock_club_for_year_write, require_completion_window_open
 from app.services.club_registration import ClubRequestError
 
 
@@ -119,6 +119,7 @@ def resubmit_club(
     }
 
     try:
+        require_completion_window_open(db, year, ClubRequestError)
         if (
             current_teacher is None
             or current_teacher.account_id != teacher.id

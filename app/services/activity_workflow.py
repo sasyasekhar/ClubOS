@@ -1,10 +1,10 @@
 
-from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.academic_year import AcademicYear
 from app.models.account import Account
 from app.models.school import School
 from app.models.club_membership import ClubMembership
@@ -13,15 +13,14 @@ from app.models.activity_revision import ActivityRevision
 from app.models.audit_log import AuditLog
 from app.models.enums import (
     AccountType,
-    AcademicYearStatus,
     ClubStatus,
     ClubRole,
     MembershipStatus,
     ActivityRevisionStatus,
 )
 from app.schemas.activity import ActivityDraftCreate
-from app.services.academic_year_write_guard import lock_club_for_year_write
-from app.services.activity_drafts import ActivityError
+from app.services.academic_year_write_guard import lock_club_for_year_write, require_completion_window_open
+from app.services.activity_drafts import ActivityError, require_active_activity_year
 
 
 def response_for(revision):
@@ -39,7 +38,7 @@ def authorized_revision(
     club_id: UUID,
     activity_id: UUID,
     revision_id: UUID,
-):
+) -> tuple[ActivityRevision, AcademicYear]:
     if (
         student.account_type != AccountType.STUDENT
         or not student.is_active
@@ -57,11 +56,7 @@ def authorized_revision(
 
     school = db.get(School, club.school_id)
 
-    if (
-        school is None
-        or not school.is_active
-        or year.status != AcademicYearStatus.ACTIVE
-    ):
+    if school is None or not school.is_active:
         raise ActivityError(409, "Academic year is not active.")
 
     is_rep = db.scalar(
@@ -99,7 +94,8 @@ def authorized_revision(
     if revision is None:
         raise ActivityError(404, "Revision not found.")
 
-    return revision
+    require_active_activity_year(db, year)
+    return revision, year
 
 
 def edit_activity_draft(
@@ -111,12 +107,9 @@ def edit_activity_draft(
     data: ActivityDraftCreate,
 ):
     try:
-        revision = authorized_revision(
+        revision, year = authorized_revision(
             db, student, club_id, activity_id, revision_id
         )
-
-        if revision.status != ActivityRevisionStatus.DRAFT:
-            raise ActivityError(409, "Revision is not editable.")
 
         values = data.model_dump()
         changed_fields = [
@@ -125,8 +118,12 @@ def edit_activity_draft(
         ]
 
         # Identical PUT requests do not produce additional writes.
-        if not changed_fields:
+        if revision.status == ActivityRevisionStatus.DRAFT and not changed_fields:
             return response_for(revision)
+
+        require_completion_window_open(db, year, ActivityError)
+        if revision.status != ActivityRevisionStatus.DRAFT:
+            raise ActivityError(409, "Revision is not editable.")
 
         for field, value in values.items():
             setattr(revision, field, value)
@@ -155,7 +152,7 @@ def submit_activity_draft(
     revision_id: UUID,
 ):
     try:
-        revision = authorized_revision(
+        revision, year = authorized_revision(
             db, student, club_id, activity_id, revision_id
         )
 
@@ -163,11 +160,12 @@ def submit_activity_draft(
         if revision.status == ActivityRevisionStatus.PENDING:
             return response_for(revision)
 
+        submitted_at = require_completion_window_open(db, year, ActivityError)
         if revision.status != ActivityRevisionStatus.DRAFT:
             raise ActivityError(409, "Revision cannot be submitted.")
 
         revision.status = ActivityRevisionStatus.PENDING
-        revision.submitted_at = datetime.now(timezone.utc)
+        revision.submitted_at = submitted_at
 
         db.add(AuditLog(
             actor_account_id=student.id,

@@ -20,7 +20,7 @@ from app.models.enums import (
     MembershipStatus,
 )
 from app.schemas.club import ClubReviewRequest
-from app.services.academic_year_write_guard import lock_club_for_year_write
+from app.services.academic_year_write_guard import lock_club_for_year_write, require_completion_window_open
 from app.services.club_registration import ClubRequestError
 
 
@@ -107,18 +107,8 @@ def review_club(
             raise ClubRequestError(
                 409, "Club cannot be approved in its current state."
             )
-
-        db.add(ClubMembership(
-            club_id=club.id,
-            account_id=student.id,
-            role=ClubRole.STUDENT_REP,
-            status=MembershipStatus.ACTIVE,
-            start_date=date.today(),
-        ))
     elif year.status != AcademicYearStatus.ACTIVE:
         raise ClubRequestError(409, "Academic year is not active.")
-
-    club.status = STATUS_MAP[data.decision]
 
     review = ClubReview(
         id=review_id,
@@ -140,6 +130,16 @@ def review_club(
     )
 
     try:
+        require_completion_window_open(db, year, ClubRequestError)
+        if data.decision == ClubReviewDecision.APPROVED:
+            db.add(ClubMembership(
+                club_id=club.id,
+                account_id=student.id,
+                role=ClubRole.STUDENT_REP,
+                status=MembershipStatus.ACTIVE,
+                start_date=date.today(),
+            ))
+        club.status = STATUS_MAP[data.decision]
         db.add_all([review, audit])
         db.commit()
     except Exception:

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.models.account import Account
 from app.models.activity_revision import ActivityRevision
 from app.models.enums import ActivityRevisionStatus
+from app.services.academic_year_write_guard import require_completion_window_open
 from app.services.activity_drafts import ActivityError
 from app.services.activity_workflow import authorized_revision
 
@@ -259,7 +260,7 @@ def ensure_upload_allowed(
     activity_id: UUID,
     revision_id: UUID,
 ) -> ActivityRevision:
-    revision = authorized_revision(
+    revision, year = authorized_revision(
         db,
         student,
         club_id,
@@ -267,6 +268,12 @@ def ensure_upload_allowed(
         revision_id,
     )
 
+    require_uploadable_revision(revision)
+    require_completion_window_open(db, year, ActivityError)
+    return revision
+
+
+def require_uploadable_revision(revision: ActivityRevision) -> None:
     if (
         revision.status != ActivityRevisionStatus.DRAFT
         or revision.content_purged_at is not None
@@ -275,5 +282,3 @@ def ensure_upload_allowed(
             409,
             "Attachments can only be added to draft revisions.",
         )
-
-    return revision

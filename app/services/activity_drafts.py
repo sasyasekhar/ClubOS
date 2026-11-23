@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.models.academic_year import AcademicYear
 from app.models.account import Account
 from app.models.school import School
 from app.models.club_membership import ClubMembership
@@ -22,14 +23,22 @@ from app.models.enums import (
 )
 
 from app.schemas.activity import ActivityDraftCreate
-from app.services.academic_year_write_guard import lock_club_for_year_write
+from app.services.academic_year_write_guard import lock_club_for_year_write, require_completion_window_open
 
 
 class ActivityError(Exception):
-    def __init__(self, status_code: int, detail: str):
+    def __init__(self, status_code: int, detail: str | dict[str, str]):
         self.status_code = status_code
         self.detail = detail
         super().__init__(detail)
+
+
+def require_active_activity_year(
+    db: Session, year: AcademicYear, detail: str = "Academic year is not active."
+) -> None:
+    if year.status != AcademicYearStatus.ACTIVE:
+        require_completion_window_open(db, year, ActivityError)
+        raise ActivityError(409, detail)
 
 
 def create_activity_draft(
@@ -91,11 +100,7 @@ def create_activity_draft(
 
     school = db.get(School, student.school_id)
 
-    if (
-        school is None
-        or not school.is_active
-        or year.status != AcademicYearStatus.ACTIVE
-    ):
+    if school is None or not school.is_active:
         raise ActivityError(
             409, "An active academic year is required."
         )
@@ -146,6 +151,8 @@ def create_activity_draft(
     )
 
     try:
+        require_active_activity_year(db, year, "An active academic year is required.")
+        require_completion_window_open(db, year, ActivityError)
         db.add_all([activity, revision, audit])
         db.commit()
 

@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from app.routes import academic_years, auth, clubs, activities, publications
+from app.routes import academic_years, auth, clubs, activities, closure_alerts, publications
 from app.services.storage import get_attachment_storage
 
 
@@ -32,6 +32,7 @@ async def health_check():
 
 app.include_router(auth.router, prefix="/auth", tags=["Authentication"])
 app.include_router(academic_years.router)
+app.include_router(closure_alerts.router)
 app.include_router(clubs.router)
 app.include_router(activities.router)
 app.include_router(publications.router)

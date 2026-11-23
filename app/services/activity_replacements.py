@@ -10,6 +10,7 @@ from app.models.activity_revision import ActivityRevision
 from app.models.audit_log import AuditLog
 from app.models.enums import ActivityRevisionStatus
 from app.schemas.activity import ActivityDraftCreate
+from app.services.academic_year_write_guard import require_completion_window_open
 from app.services.activity_drafts import ActivityError
 from app.services.activity_workflow import (
     authorized_revision,
@@ -27,7 +28,7 @@ def create_replacement_draft(
     idempotency_key: UUID,
 ):
     try:
-        source = authorized_revision(
+        source, year = authorized_revision(
             db, student, club_id, activity_id, revision_id
         )
 
@@ -61,6 +62,7 @@ def create_replacement_draft(
 
             return response_for(revision)
 
+        require_completion_window_open(db, year, ActivityError)
         if (
             source.status != ActivityRevisionStatus.APPROVED
             or not source.is_published

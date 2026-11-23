@@ -1,6 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from queue import Queue
 from threading import Barrier, Event
 from time import monotonic, sleep
@@ -18,6 +18,7 @@ from app.models.academic_year_closure_request import AcademicYearClosureRequest
 from app.models.account import Account
 from app.models.activity import Activity
 from app.models.activity_attachment import ActivityAttachment
+from app.models.activity_deadline_rejection import DEADLINE_EXPIRY_REASON, ActivityDeadlineRejection
 from app.models.activity_review import ActivityReview
 from app.models.activity_revision import ActivityRevision
 from app.models.audit_log import AuditLog
@@ -160,6 +161,9 @@ def scenario():
         revisions = select(ActivityRevision.id).where(ActivityRevision.activity_id.in_(activities))
         with SessionLocal.begin() as db:
             db.execute(delete(AuditLog).where(AuditLog.actor_account_id.in_(data.accounts.values())))
+            db.execute(delete(ActivityDeadlineRejection).where(ActivityDeadlineRejection.closure_request_id.in_(
+                select(AcademicYearClosureRequest.id).where(AcademicYearClosureRequest.school_id.in_(schools))
+            )))
             db.execute(delete(AcademicYearClosureRequest).where(AcademicYearClosureRequest.school_id.in_(schools)))
             db.execute(delete(ActivityAttachment).where(ActivityAttachment.revision_id.in_(revisions)))
             db.execute(delete(ActivityReview).where(ActivityReview.revision_id.in_(revisions)))
@@ -198,6 +202,17 @@ def closure_audits(scenario, action):
 def year_status(scenario, year="active"):
     with SessionLocal() as db:
         return db.get(AcademicYear, scenario.years[year]).status
+
+
+def set_request_deadline(request_id, deadline=None):
+    """Move both stored dates using the test database clock to exercise window transitions."""
+    with SessionLocal.begin() as db:
+        if deadline is None:
+            deadline = db.scalar(select(func.clock_timestamp())).astimezone(timezone.utc) - timedelta(seconds=1)
+        request = db.get(AcademicYearClosureRequest, UUID(str(request_id)))
+        request.requested_at = deadline - timedelta(hours=168)
+        request.completion_deadline_at = deadline
+    return deadline
 
 
 def add_activity(db, scenario, *statuses, club_status=ClubStatus.ACTIVE):
@@ -269,6 +284,8 @@ def test_only_current_teacher_can_initiate_and_idempotency_key_is_required(clien
     assert scenario.request(client, actor="replacement").status_code == 403
     assert scenario.request(client, actor="inactive").status_code == 401
     assert scenario.request(client, actor="admin").status_code == 403
+    assert scenario.request(client, actor="student").status_code == 403
+    assert scenario.request(client, actor="owner").status_code == 403
     assert scenario.request(client, year="historical").status_code == 409
     assert client.post(
         f"{PATH}/{scenario.years['active']}/closure-request", headers=scenario.auth("teacher"),
@@ -281,7 +298,11 @@ def test_only_current_teacher_can_initiate_and_idempotency_key_is_required(clien
     assert body["teacher_account_id"] == str(scenario.accounts["teacher"])
     assert body["academic_year_id"] == str(scenario.years["active"])
     assert body["status"] == "PENDING"
-    assert datetime.fromisoformat(body["requested_at"]).utcoffset() is not None
+    assert body["window_status"] == "OPEN"
+    requested_at = datetime.fromisoformat(body["requested_at"])
+    deadline = datetime.fromisoformat(body["completion_deadline_at"])
+    assert requested_at.utcoffset() == deadline.utcoffset() == timedelta(0)
+    assert deadline - requested_at == timedelta(hours=168)
     assert body["confirmed_by_account_id"] is body["confirmed_at"] is None
     assert scenario.pending(client).json() == body
     assert year_status(scenario) == AcademicYearStatus.ACTIVE
@@ -298,7 +319,15 @@ def test_request_replays_and_conflicts_are_scoped(client, scenario, designated):
     assert scenario.request(client, key=key, year="historical").json() == {
         "detail": "Idempotency key reused for another closure request.",
     }
-    assert scenario.request(client).status_code == 409
+    duplicate = scenario.request(client)
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"]["code"] == "ACADEMIC_YEAR_CLOSURE_REQUEST_EXISTS"
+    assert duplicate.json()["detail"]["message"] == "An academic-year closure request has already been submitted by this teacher."
+    assert duplicate.json()["detail"]["request_id"] == first.json()["id"]
+    assert datetime.fromisoformat(duplicate.json()["detail"]["completion_deadline_at"]) == datetime.fromisoformat(
+        first.json()["completion_deadline_at"]
+    )
+    assert scenario.pending(client).json() == first.json()
     assert scenario.designate(client, "other_teacher", "other_admin").status_code == 200
     foreign = scenario.request(client, year="other", actor="other_teacher", key=key)
     assert foreign.status_code == 201
@@ -306,15 +335,18 @@ def test_request_replays_and_conflicts_are_scoped(client, scenario, designated):
     assert len(closure_audits(scenario, REQUESTED)) == 2
 
 
-def test_pending_revisions_in_inactive_clubs_block_initiation(client, scenario, designated):
+def test_pending_revisions_in_inactive_clubs_do_not_block_initiation(client, scenario, designated):
     with SessionLocal.begin() as db:
         add_activity(db, scenario, ActivityRevisionStatus.PENDING, club_status=ClubStatus.ARCHIVED)
         add_activity(db, scenario, ActivityRevisionStatus.DRAFT, ActivityRevisionStatus.PENDING)
     response = scenario.request(client)
-    assert response.status_code == 409
-    assert response.json()["detail"]["pending_review_blocker_count"] == 2
-    assert scenario.pending(client).json() is None
-    assert closure_audits(scenario, REQUESTED) == []
+    assert response.status_code == 201, response.text
+    assert response.json()["window_status"] == "OPEN"
+    readiness = client.get(f"{PATH}/{scenario.years['active']}/closure-readiness", headers=scenario.auth("admin")).json()
+    assert readiness["pending_review_blocker_count"] == 2
+    assert readiness["pending_review_attention_count"] == 1
+    assert readiness["can_initiate"] is readiness["can_confirm"] is False
+    assert len(closure_audits(scenario, REQUESTED)) == 1
 
 
 def test_confirmation_and_request_views_validate_school_and_role(client, scenario, designated):
@@ -370,6 +402,7 @@ def test_confirmation_preserves_history_and_closes_only_the_requested_year(clien
     request = scenario.request(client, key=key)
     assert request.status_code == 201, request.text
     request_id = request.json()["id"]
+    set_request_deadline(request_id)
     result = scenario.confirm(client, request_id)
     assert result.status_code == 200, result.text
     assert result.json()["status"] == "CONFIRMED"
@@ -391,36 +424,73 @@ def test_confirmation_preserves_history_and_closes_only_the_requested_year(clien
     assert audit.details["request_id"] == request_id
 
 
-def test_confirmation_rechecks_pending_revisions_and_rolls_back(client, scenario, designated):
+def test_confirmation_waits_for_deadline_then_reconciles_pending_revisions(client, scenario, designated):
     request_id = scenario.request(client).json()["id"]
     with SessionLocal.begin() as db:
-        add_activity(db, scenario, ActivityRevisionStatus.PENDING, club_status=ClubStatus.ARCHIVED)
+        _, _, (revision_id,) = add_activity(db, scenario, ActivityRevisionStatus.PENDING, club_status=ClubStatus.ARCHIVED)
 
     result = scenario.confirm(client, request_id)
     assert result.status_code == 409
-    assert result.json()["detail"]["pending_review_blocker_count"] == 1
+    assert result.json()["detail"]["code"] == "ACADEMIC_YEAR_COMPLETION_WINDOW_OPEN"
     assert scenario.pending(client).json()["status"] == "PENDING"
     assert year_status(scenario) == AcademicYearStatus.ACTIVE
     assert closure_audits(scenario, CLOSED) == []
+    deadline = set_request_deadline(request_id)
+    readiness_path = f"{PATH}/{scenario.years['active']}/closure-readiness"
+    pre = client.get(readiness_path, headers=scenario.auth("admin")).json()
+    assert pre["window_status"] == "EXPIRED"
+    assert pre["can_confirm"] is True
+    assert pre["pending_review_blocker_count"] == 1
+    assert pre["auto_rejected_count"] == 0
+    confirmed = scenario.confirm(client, request_id)
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["window_status"] == "CONFIRMED"
+    assert datetime.fromisoformat(confirmed.json()["finalized_at"]) >= deadline
+    after = client.get(readiness_path, headers=scenario.auth("admin")).json()
+    assert after["pending_review_blocker_count"] == 0
+    assert after["auto_rejected_count"] == 1
+    assert after["can_confirm"] is False
+    with SessionLocal() as db:
+        assert db.get(ActivityRevision, revision_id).status == ActivityRevisionStatus.REJECTED
+        assert db.get(ActivityDeadlineRejection, revision_id).reason == DEADLINE_EXPIRY_REASON
 
 
 @pytest.mark.parametrize("change", ["replaced", "reappointed", "deactivated"])
-def test_confirmation_fails_closed_when_requester_authorization_changed(client, scenario, designated, change):
-    request_id = scenario.request(client).json()["id"]
+def test_confirmation_preserves_the_original_request_when_authorization_changes(client, scenario, designated, change):
+    key = uuid4()
+    original = scenario.request(client, key=key).json()
+    request_id = original["id"]
     if change == "deactivated":
         with SessionLocal.begin() as db:
             db.get(Account, scenario.accounts["teacher"]).is_active = False
     else:
         assert scenario.designate(client, "replacement").status_code == 200
         assert scenario.request(client, actor="teacher").status_code == 403
+        assert scenario.request(client, actor="teacher", key=key).json() == original
+        duplicate = scenario.request(client, actor="replacement")
+        assert duplicate.status_code == 409
+        assert duplicate.json()["detail"]["code"] == "ACADEMIC_YEAR_CLOSURE_REQUEST_EXISTS"
         if change == "reappointed":
             assert scenario.designate(client).status_code == 200
 
+    assert scenario.pending(client).json() == original
+    set_request_deadline(request_id)
     response = scenario.confirm(client, request_id)
-    assert response.status_code == 409
-    assert year_status(scenario) == AcademicYearStatus.ACTIVE
-    assert scenario.pending(client).json()["status"] == "PENDING"
-    assert closure_audits(scenario, CLOSED) == []
+    assert response.status_code == 200, response.text
+    assert response.json()["teacher_account_id"] == str(scenario.accounts["teacher"])
+    assert year_status(scenario) == AcademicYearStatus.CLOSED
+    assert len(closure_audits(scenario, REQUESTED)) == len(closure_audits(scenario, CLOSED)) == 1
+
+    if change == "replaced":
+        next_year = client.post(PATH, headers={**scenario.auth("admin"), "Idempotency-Key": str(uuid4())}, json={
+            "name": "Next year", "start_date": "2027-06-01", "end_date": "2028-05-31",
+        })
+        assert next_year.status_code == 201, next_year.text
+        initiated = client.post(f"{PATH}/{next_year.json()['id']}/closure-request", headers={
+            **scenario.auth("replacement"), "Idempotency-Key": str(uuid4()),
+        })
+        assert initiated.status_code == 201, initiated.text
+        assert initiated.json()["teacher_account_id"] == str(scenario.accounts["replacement"])
 
 
 def backend_pid(db):
@@ -488,6 +558,7 @@ def test_concurrent_requests_create_one_request_and_audit(scenario, designated, 
 
 def test_concurrent_confirmations_record_one_transition(client, scenario, designated, monkeypatch):
     request_id = scenario.request(client).json()["id"]
+    set_request_deadline(request_id)
     first, second = concurrent_requests(
         monkeypatch,
         lambda client: scenario.confirm(client, request_id),
@@ -514,12 +585,14 @@ def run_transaction(operation, pids, *, release=None):
         return operation(db)
 
 
-def ordered_transactions(first_operation, second_operation, error_type):
+def ordered_transactions(first_operation, second_operation, error_type=None, *, while_first_waits=None):
     first_pids, second_pids, release = Queue(), Queue(), Event()
     with ThreadPoolExecutor(max_workers=2) as workers:
         first = workers.submit(run_transaction, first_operation, first_pids, release=release)
         try:
             first_pid = first_pids.get(timeout=WAIT)
+            if while_first_waits is not None:
+                while_first_waits()
             second = workers.submit(run_transaction, second_operation, second_pids)
             second_pid = second_pids.get(timeout=WAIT)
             assert first_pid != second_pid
@@ -532,14 +605,18 @@ def ordered_transactions(first_operation, second_operation, error_type):
             release.set()
 
         first.result(timeout=WAIT)
-        with pytest.raises(error_type) as rejected:
-            second.result(timeout=WAIT)
+        if error_type is None:
+            result = second.result(timeout=WAIT)
+        else:
+            with pytest.raises(error_type) as rejected:
+                second.result(timeout=WAIT)
+            result = rejected.value
     with SessionLocal() as db:
         assert not db.execute(text(
             "SELECT pid FROM pg_stat_activity WHERE pid = ANY(:pids) "
             "AND pid <> pg_backend_pid() AND xact_start IS NOT NULL"
         ), {"pids": [first_pid, second_pid]}).all()
-    return rejected.value
+    return result
 
 
 @pytest.mark.parametrize("first_actor", ["student", "admin"])
@@ -557,22 +634,24 @@ def test_activity_submission_races_with_actual_confirmation(client, scenario, de
         return confirm_year_closure(db, admin, scenario.years["active"], request_id)
 
     if first_actor == "student":
-        error = ordered_transactions(submit, confirm, AcademicYearError)
-        assert error.detail["pending_review_blocker_count"] == 1
-        assert year_status(scenario) == AcademicYearStatus.ACTIVE
+        # Admission occurred while the window was open. Advance the test deadline
+        # while that transaction is still holding its shared academic-year lock.
+        confirmation = ordered_transactions(submit, confirm, while_first_waits=lambda: set_request_deadline(request_id))
+        assert confirmation.status.value == "CONFIRMED"
         assert len(closure_audits(scenario, "ACTIVITY_SUBMITTED")) == 1
-        assert closure_audits(scenario, CLOSED) == []
-        expected = ActivityRevisionStatus.PENDING
+        expected = ActivityRevisionStatus.REJECTED
     else:
+        set_request_deadline(request_id)
         error = ordered_transactions(confirm, submit, ActivityError)
-        assert error.detail == "Academic year is not active."
-        assert year_status(scenario) == AcademicYearStatus.CLOSED
+        assert error.detail["code"] == "ACADEMIC_YEAR_COMPLETION_WINDOW_ENDED"
+        assert error.status_code == 409
         assert closure_audits(scenario, "ACTIVITY_SUBMITTED") == []
-        assert len(closure_audits(scenario, CLOSED)) == 1
         expected = ActivityRevisionStatus.DRAFT
-    assert error.status_code == 409
+    assert year_status(scenario) == AcademicYearStatus.CLOSED
+    assert len(closure_audits(scenario, CLOSED)) == 1
     with SessionLocal() as db:
         assert db.get(ActivityRevision, revision_id).status == expected
+        assert (db.get(ActivityDeadlineRejection, revision_id) is not None) == (first_actor == "student")
 
 
 def test_teacher_waiting_behind_replacement_cannot_request_closure(scenario, designated):
@@ -592,6 +671,9 @@ def test_teacher_waiting_behind_replacement_cannot_request_closure(scenario, des
 
 def test_confirmation_database_failure_rolls_back_year_request_and_audit(client, scenario, designated):
     request_id = scenario.request(client).json()["id"]
+    set_request_deadline(request_id)
+    with SessionLocal.begin() as db:
+        _, _, (revision_id,) = add_activity(db, scenario, ActivityRevisionStatus.PENDING)
 
     def abort_after_database_flush(db, _context):
         if any(isinstance(row, AuditLog) and row.action == CLOSED for row in db.new):
@@ -606,5 +688,8 @@ def test_confirmation_database_failure_rolls_back_year_request_and_audit(client,
     assert year_status(scenario) == AcademicYearStatus.ACTIVE
     assert scenario.pending(client).json()["status"] == "PENDING"
     assert closure_audits(scenario, CLOSED) == []
+    with SessionLocal() as db:
+        assert db.get(ActivityRevision, revision_id).status == ActivityRevisionStatus.PENDING
+        assert db.get(ActivityDeadlineRejection, revision_id) is None
     assert scenario.confirm(client, request_id).status_code == 200
     assert len(closure_audits(scenario, CLOSED)) == 1

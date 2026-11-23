@@ -16,22 +16,25 @@ from uuid import UUID
 from zipfile import ZIP_DEFLATED, BadZipFile, LargeZipFile, ZipFile
 from zlib import error as CompressionError
 
-from sqlalchemy import Select, and_, func, select, text
+from sqlalchemy import Select, and_, func, literal, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models.academic_year import AcademicYear
+from app.models.academic_year_closure_request import AcademicYearClosureRequest
 from app.models.academic_year_export_limit import AcademicYearExportLimit
 from app.models.account import Account
 from app.models.activity import Activity
 from app.models.activity_attachment import ActivityAttachment
+from app.models.activity_deadline_rejection import ActivityDeadlineRejection
 from app.models.activity_review import ActivityReview
 from app.models.activity_revision import ActivityRevision
 from app.models.audit_log import AuditLog
 from app.models.club import Club
 from app.models.club_membership import ClubMembership
 from app.models.club_review import ClubReview
+from app.models.enums import ActivityRevisionStatus
 from app.models.school_admin import SchoolAdmin
 from app.services.academic_years import AcademicYearError, require_admin_school
 
@@ -58,7 +61,7 @@ def _year_query(school_id: UUID, year_id: UUID) -> Select:
     ).where(AcademicYear.id == year_id, AcademicYear.school_id == school_id)
 
 
-def _export_queries(school_id: UUID, year_id: UUID) -> Iterator[tuple[str, str, Select]]:
+def _export_queries(db: Session, school_id: UUID, year_id: UUID) -> Iterator[tuple[str, str, Select]]:
     clubs = (
         select(Club.id.label("club_id"), Club.academic_year_id, Club.name, Club.category, Club.status)
         .join(AcademicYear, and_(
@@ -164,6 +167,28 @@ def _export_queries(school_id: UUID, year_id: UUID) -> Iterator[tuple[str, str, 
         .where(revisions.c.content_purged_at.is_(None))
         .order_by(ActivityAttachment.id),
     )
+    system_rejections = (
+        select(
+            ActivityDeadlineRejection.revision_id,
+            ActivityDeadlineRejection.closure_request_id,
+            literal("SYSTEM").label("source"),
+            literal(ActivityRevisionStatus.REJECTED.value).label("decision"),
+            ActivityDeadlineRejection.reason,
+            ActivityDeadlineRejection.resolved_at,
+        )
+        .join_from(ActivityDeadlineRejection, revisions, revisions.c.revision_id == ActivityDeadlineRejection.revision_id)
+        .join(AcademicYearClosureRequest, AcademicYearClosureRequest.id == ActivityDeadlineRejection.closure_request_id)
+        .where(
+            AcademicYearClosureRequest.school_id == school_id,
+            AcademicYearClosureRequest.academic_year_id == year_id,
+        )
+    )
+    if db.scalar(select(system_rejections.exists())):
+        yield (
+            "activity_deadline_rejections.csv",
+            "System-generated rejections at the academic-year completion deadline.",
+            system_rejections.order_by(ActivityDeadlineRejection.revision_id),
+        )
 
 
 def _csv_value(value: object) -> object:
@@ -231,7 +256,7 @@ def _write_archive(db: Session, output: BinaryIO, school_id: UUID, year_id: UUID
     files = []
     total_rows = total_bytes = 0
     with ZipFile(output, "w", compression=ZIP_DEFLATED, compresslevel=1, allowZip64=False) as archive:
-        for filename, description, query in _export_queries(school_id, year_id):
+        for filename, description, query in _export_queries(db, school_id, year_id):
             columns, rows, size = _write_csv(
                 db, archive, filename, query,
                 remaining_rows=MAX_EXPORT_ROWS - total_rows,

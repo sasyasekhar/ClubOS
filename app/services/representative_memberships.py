@@ -18,7 +18,7 @@ from app.models.enums import (
     ClubStatus,
     MembershipStatus,
 )
-from app.services.academic_year_write_guard import lock_club_for_year_write
+from app.services.academic_year_write_guard import lock_club_for_year_write, require_completion_window_open
 from app.services.club_registration import ClubRequestError
 
 
@@ -108,6 +108,7 @@ def end_representative(
         raise ClubRequestError(409, "Academic year is not active.")
 
     try:
+        require_completion_window_open(db, year, ClubRequestError)
         membership.status = MembershipStatus.ENDED
         membership.end_date = datetime.now(timezone.utc).date()
 
@@ -225,6 +226,7 @@ def rejoin_representative(
     )
 
     try:
+        require_completion_window_open(db, year, ClubRequestError)
         db.add(new_membership)
         db.add(AuditLog(
             id=event_id,

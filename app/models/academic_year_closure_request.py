@@ -31,9 +31,21 @@ class AcademicYearClosureRequest(Base):
             OR (status <> 'CONFIRMED' AND confirmed_by_account_id IS NULL AND confirmed_at IS NULL)""",
             name="ck_closure_request_confirmation",
         ),
+        CheckConstraint(
+            "completion_deadline_at = requested_at + INTERVAL '168 hours'",
+            name="ck_closure_request_completion_window",
+        ),
+        CheckConstraint(
+            "finalized_at IS NULL OR finalized_at >= completion_deadline_at",
+            name="ck_closure_request_finalized_after_deadline",
+        ),
         Index(
             "uq_current_closure_request_year", "school_id", "academic_year_id", unique=True,
             postgresql_where=text("status IN ('PENDING', 'CONFIRMED')"),
+        ),
+        Index(
+            "ix_closure_request_unfinalized_deadline", "completion_deadline_at", "id",
+            postgresql_where=text("status = 'PENDING' AND finalized_at IS NULL"),
         ),
     )
 
@@ -44,6 +56,8 @@ class AcademicYearClosureRequest(Base):
     designation_id: Mapped[UUID]
     idempotency_key: Mapped[UUID]
     requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completion_deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[ClosureRequestStatus] = mapped_column(Enum(
         ClosureRequestStatus, native_enum=False, length=16, create_constraint=True,
         name="ck_closure_request_status",
