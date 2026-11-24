@@ -11,6 +11,7 @@ from app.models.academic_year_final_export import AcademicYearFinalExport
 from app.models.club import Club
 from app.models.club_review import ClubReview
 from app.models.club_membership import ClubMembership
+from app.models.representative_application import RepresentativeApplication
 
 from app.models.activity import Activity
 from app.models.activity_revision import ActivityRevision

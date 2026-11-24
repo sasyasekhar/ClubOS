@@ -1,7 +1,10 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from app.routes import academic_year_history, academic_years, auth, clubs, activities, closure_alerts, publications
+from app.routes import (
+    academic_year_history, academic_years, activities, auth, closure_alerts, clubs, publications,
+    representative_applications,
+)
 from app.services.storage import get_attachment_storage
 
 
@@ -35,5 +38,6 @@ app.include_router(academic_years.router)
 app.include_router(academic_year_history.router)
 app.include_router(closure_alerts.router)
 app.include_router(clubs.router)
+app.include_router(representative_applications.router)
 app.include_router(activities.router)
 app.include_router(publications.router)
