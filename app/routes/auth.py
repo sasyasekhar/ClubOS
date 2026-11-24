@@ -1,5 +1,8 @@
 
-from fastapi import APIRouter, Depends, HTTPException, status
+import logging
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.config.database import get_db
@@ -21,8 +24,6 @@ from app.services.member_registration import (
     SchoolNotAvailable,
 )
 
-from fastapi import Request, Response, Header
-
 from app.config.settings import settings
 from app.models.school import School
 from app.schemas.auth import LoginRequest, LoginResponse, AccountResponse
@@ -31,21 +32,57 @@ from app.services.authentication import (
     InvalidCredentials,
 )
 from app.services.sessions import (
+    AuthenticationContext,
+    ImpersonationRestricted,
+    InvalidSession,
+    authentication_context,
     create_session,
     current_account,
-    revoke_session,
     record_failed_login,
-    InvalidSession,
+    revoke_session,
 )
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+COOKIE_NAME = "clubos_session"
+PRIVATE_HEADERS = {"Cache-Control": "private, no-store"}
+
+
+def _impersonation_restricted() -> HTTPException:
+    return HTTPException(403, "End impersonation before using this operation.", headers=PRIVATE_HEADERS)
+
+
+def _authentication_unavailable(db: Session, exc: SQLAlchemyError) -> HTTPException:
+    db.rollback()
+    logger.error("Authentication database operation failed (%s)", type(exc).__name__)
+    return HTTPException(503, "Authentication is temporarily unavailable.", headers=PRIVATE_HEADERS)
+
+
+def reject_impersonation_on_public_route(
+    request: Request,
+    db: Session = Depends(get_db),
+    tab_key: str | None = Header(default=None, alias="X-ClubOS-Tab"),
+):
+    cookie_token = request.cookies.get(COOKIE_NAME)
+    if not cookie_token or not tab_key:
+        return
+    try:
+        context = authentication_context(db, cookie_token, tab_key, renew=False)
+        if context.is_impersonating or context.impersonation_invalidated:
+            raise _impersonation_restricted()
+    except InvalidSession:
+        # These operations also serve unauthenticated clients.
+        return
+    except SQLAlchemyError as exc:
+        raise _authentication_unavailable(db, exc) from exc
 
 
 @router.post(
     "/register-school",
     response_model=SchoolRegistrationResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(reject_impersonation_on_public_route)],
 )
 def create_school(
     payload: SchoolRegistration,
@@ -63,6 +100,7 @@ def create_school(
     "/register",
     response_model=MemberRegistrationResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(reject_impersonation_on_public_route)],
 )
 def create_member(
     payload: MemberRegistration,
@@ -83,9 +121,6 @@ def create_member(
             detail="Registration could not be completed.",
         )
 
-COOKIE_NAME = "clubos_session"
-
-
 def require_account(
     request: Request,
     db: Session = Depends(get_db),
@@ -97,14 +132,29 @@ def require_account(
             request.cookies.get(COOKIE_NAME),
             tab_key,
         )
-    except InvalidSession:
-        raise HTTPException(
-            status_code=401,
-            detail="Authentication required",
-        )
+    except InvalidSession as exc:
+        raise HTTPException(401, "Authentication required", headers=PRIVATE_HEADERS) from exc
+    except ImpersonationRestricted as exc:
+        raise _impersonation_restricted() from exc
+    except SQLAlchemyError as exc:
+        raise _authentication_unavailable(db, exc) from exc
 
 
-@router.post("/login", response_model=LoginResponse)
+def require_auth_context(
+    request: Request,
+    db: Session = Depends(get_db),
+    tab_key: str | None = Header(default=None, alias="X-ClubOS-Tab"),
+) -> AuthenticationContext:
+    """Resolve context for the explicitly allowed impersonation routes."""
+    try:
+        return authentication_context(db, request.cookies.get(COOKIE_NAME), tab_key, lock_admin=True)
+    except InvalidSession as exc:
+        raise HTTPException(401, "Authentication required", headers=PRIVATE_HEADERS) from exc
+    except SQLAlchemyError as exc:
+        raise _authentication_unavailable(db, exc) from exc
+
+
+@router.post("/login", response_model=LoginResponse, dependencies=[Depends(reject_impersonation_on_public_route)])
 def login(
     payload: LoginRequest,
     response: Response,
@@ -155,7 +205,20 @@ def get_me(
 
 
 @router.post("/heartbeat")
-def heartbeat(account=Depends(require_account)):
+def heartbeat(
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+    tab_key: str | None = Header(default=None, alias="X-ClubOS-Tab"),
+):
+    try:
+        # Session maintenance does not grant either account's business access.
+        authentication_context(db, request.cookies.get(COOKIE_NAME), tab_key)
+    except InvalidSession as exc:
+        raise HTTPException(401, "Authentication required", headers=PRIVATE_HEADERS) from exc
+    except SQLAlchemyError as exc:
+        raise _authentication_unavailable(db, exc) from exc
+    response.headers.update(PRIVATE_HEADERS)
     return {"status": "active"}
 
 
@@ -169,10 +232,10 @@ def logout(
     if not tab_key:
         raise HTTPException(status_code=401, detail="Authentication required")
 
-    revoke_session(
-        db,
-        request.cookies.get(COOKIE_NAME),
-        tab_key,
-    )
+    try:
+        revoke_session(db, request.cookies.get(COOKIE_NAME), tab_key)
+    except SQLAlchemyError as exc:
+        raise _authentication_unavailable(db, exc) from exc
 
+    response.headers.update(PRIVATE_HEADERS)
     response.delete_cookie(COOKIE_NAME, path="/", samesite="lax")

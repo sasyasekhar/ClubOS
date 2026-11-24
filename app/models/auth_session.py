@@ -16,6 +16,7 @@ class AuthSession(Base):
             "token_hash",
             name="uq_auth_sessions_token_hash",
         ),
+        UniqueConstraint("id", "account_id", name="uq_auth_session_id_account"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(

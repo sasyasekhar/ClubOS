@@ -6,6 +6,7 @@ from sqlalchemy import (
     Text,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     CheckConstraint,
     Enum as SAEnum,
     UniqueConstraint,
@@ -37,18 +38,34 @@ class ImpersonationSession(Base):
             "target_account_id",
             name="uq_impersonation_session_id_admin_target",
         ),
+        ForeignKeyConstraint(
+            ["auth_session_id", "admin_account_id"],
+            ["auth_sessions.id", "auth_sessions.account_id"],
+            name="fk_impersonation_auth_session_admin",
+        ),
+        CheckConstraint(
+            "(auth_session_id IS NULL) = (school_id IS NULL) AND (status <> 'ACTIVE' OR auth_session_id IS NOT NULL)",
+            name="ck_impersonation_parent_binding",
+        ),
+        CheckConstraint(
+            """auth_session_id IS NULL OR (
+                char_length(reason) <= 500 AND reason ~ '[^[:space:]]' AND (
+                    (status = 'ACTIVE' AND ended_at IS NULL AND end_reason IS NULL)
+                    OR (status <> 'ACTIVE' AND ended_at IS NOT NULL AND ended_at >= started_at AND end_reason IS NOT NULL)
+                )
+            )""",
+            name="ck_impersonation_bound_lifecycle",
+        ),
+        Index(
+            "uq_one_active_impersonation_per_admin", "admin_account_id", unique=True,
+            postgresql_where=text("status = 'ACTIVE'"),
+        ),
+        Index("ix_impersonation_auth_session_started", "auth_session_id", "started_at", "id"),
     )
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True,
         default=uuid.uuid4,
     )
-    Index(
-    "uq_one_active_impersonation_per_admin",
-    "admin_account_id",
-    unique=True,
-    postgresql_where=text("status = 'ACTIVE'"),
-    )
-
     admin_account_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("accounts.id"),
         nullable=False,
@@ -60,6 +77,10 @@ class ImpersonationSession(Base):
         nullable=False,
         index=True,
     )
+
+    # Historical pre-binding rows remain readable, but cannot grant authority.
+    auth_session_id: Mapped[uuid.UUID | None]
+    school_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("schools.id"))
 
     reason: Mapped[str] = mapped_column(
         Text,
@@ -85,3 +106,4 @@ class ImpersonationSession(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+    end_reason: Mapped[str | None] = mapped_column(String(500))
