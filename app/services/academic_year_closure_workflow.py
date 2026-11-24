@@ -238,7 +238,9 @@ def confirm_year_closure(
             raise AcademicYearError(404, "Closure request not found.")
 
         now = _database_now(db)
-        if request.status == ClosureRequestStatus.CONFIRMED and year.status == AcademicYearStatus.CLOSED:
+        if request.status == ClosureRequestStatus.CONFIRMED and year.status in (
+            AcademicYearStatus.CLOSED, AcademicYearStatus.ARCHIVED,
+        ):
             return _request_response(request, now)
         if year.status != AcademicYearStatus.ACTIVE or request.status != ClosureRequestStatus.PENDING:
             raise AcademicYearError(409, "Closure request cannot be confirmed in its current state.")

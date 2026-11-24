@@ -94,6 +94,9 @@ def review_club(
             409, "Club is not awaiting review."
         )
 
+    if club.rolled_over_from_club_id is not None and club.created_by is None:
+        raise ClubRequestError(409, "This carried-forward club is awaiting fresh representative assignments.")
+
     if data.decision == ClubReviewDecision.APPROVED:
         student = db.get(Account, club.created_by)
 

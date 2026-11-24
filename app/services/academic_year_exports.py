@@ -12,18 +12,19 @@ from tempfile import TemporaryFile
 from time import monotonic
 from typing import BinaryIO
 from unicodedata import category, normalize
-from uuid import UUID
+from uuid import UUID, uuid4
 from zipfile import ZIP_DEFLATED, BadZipFile, LargeZipFile, ZipFile
 from zlib import error as CompressionError
 
 from sqlalchemy import Select, and_, func, literal, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app.models.academic_year import AcademicYear
 from app.models.academic_year_closure_request import AcademicYearClosureRequest
 from app.models.academic_year_export_limit import AcademicYearExportLimit
+from app.models.academic_year_final_export import AcademicYearFinalExport
 from app.models.account import Account
 from app.models.activity import Activity
 from app.models.activity_attachment import ActivityAttachment
@@ -34,7 +35,7 @@ from app.models.audit_log import AuditLog
 from app.models.club import Club
 from app.models.club_membership import ClubMembership
 from app.models.club_review import ClubReview
-from app.models.enums import ActivityRevisionStatus
+from app.models.enums import AcademicYearStatus, ActivityRevisionStatus
 from app.models.school_admin import SchoolAdmin
 from app.services.academic_years import AcademicYearError, require_admin_school
 
@@ -99,6 +100,23 @@ def _export_queries(db: Session, school_id: UUID, year_id: UUID) -> Iterator[tup
 
     yield "academic_year.csv", "Name, dates, and status of the selected year.", _year_query(school_id, year_id)
     yield "clubs.csv", "Clubs and their status in the selected year.", select(clubs).order_by(clubs.c.club_id)
+    source = aliased(Club)
+    rollover_lineage = (
+        select(
+            clubs.c.club_id,
+            source.id.label("source_club_id"),
+            source.academic_year_id.label("source_academic_year_id"),
+        )
+        .select_from(clubs)
+        .join(Club, Club.id == clubs.c.club_id)
+        .join(source, and_(source.school_id == Club.school_id, source.id == Club.rolled_over_from_club_id))
+    )
+    if db.scalar(select(rollover_lineage.exists())):
+        yield (
+            "club_rollover_lineage.csv",
+            "Historical source of each carried-forward club in the selected year.",
+            rollover_lineage.order_by(clubs.c.club_id),
+        )
     yield (
         "representative_memberships.csv",
         "Representative assignments and their date and status history.",
@@ -284,12 +302,13 @@ def _write_archive(db: Session, output: BinaryIO, school_id: UUID, year_id: UUID
     return generated_at, total_rows
 
 
-def _require_exportable_year(db: Session, school_id: UUID, year_id: UUID) -> None:
-    year = db.scalar(select(AcademicYear.id).where(
+def _require_exportable_year(db: Session, school_id: UUID, year_id: UUID) -> AcademicYearStatus:
+    year_status = db.scalar(select(AcademicYear.status).where(
         AcademicYear.id == year_id, AcademicYear.school_id == school_id,
     ))
-    if year is None:
+    if year_status is None:
         raise AcademicYearError(404, "Academic year not found.")
+    return year_status
 
 
 def _reserve_export(db: Session, school_id: UUID) -> None:
@@ -331,13 +350,15 @@ def open_academic_year_export(
                 current_admin = db.get(Account, actor_id, populate_existing=True)
                 if current_admin is None or require_admin_school(db, current_admin) != school_id:
                     raise AcademicYearError(403, "Permission denied.")
-                _require_exportable_year(db, school_id, year_id)
+                snapshot_status = _require_exportable_year(db, school_id, year_id)
 
                 output = resources.enter_context(TemporaryFile(mode="w+b"))
                 generated_at, total_rows = _write_archive(db, output, school_id, year_id)
                 length = output.tell()
                 output.seek(0)
+                export_id = uuid4()
                 db.add(AuditLog(
+                    id=export_id,
                     actor_account_id=actor_id,
                     action=EXPORT_ACTION,
                     entity_type="academic_year",
@@ -345,6 +366,13 @@ def open_academic_year_export(
                     details={"school_id": str(school_id), "row_count": total_rows},
                     occurred_at=generated_at,
                 ))
+                if snapshot_status == AcademicYearStatus.CLOSED and db.get(AcademicYearFinalExport, year_id) is None:
+                    # The per-school export lock serializes the first receipt. The
+                    # report snapshot, not a later status read, qualifies the ZIP.
+                    db.add(AcademicYearFinalExport(
+                        academic_year_id=year_id, school_id=school_id, export_id=export_id,
+                        generated_at=generated_at, exported_by_account_id=actor_id,
+                    ))
         except (
             SQLAlchemyError, OSError, ValueError, LookupError, csv.Error, BadZipFile, LargeZipFile, CompressionError,
         ) as exc:

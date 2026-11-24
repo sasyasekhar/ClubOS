@@ -7,6 +7,7 @@ from app.models.school_admin import SchoolAdmin
 from app.models.academic_year import AcademicYear
 from app.models.academic_year_closure_request import AcademicYearClosureRequest
 from app.models.academic_year_export_limit import AcademicYearExportLimit
+from app.models.academic_year_final_export import AcademicYearFinalExport
 from app.models.club import Club
 from app.models.club_review import ClubReview
 from app.models.club_membership import ClubMembership

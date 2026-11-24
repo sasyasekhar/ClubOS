@@ -2,6 +2,7 @@ import uuid
 
 from sqlalchemy import (
     UUID,
+    CheckConstraint,
     String,
     Text,
     DateTime,
@@ -11,6 +12,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Enum as SAEnum,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from app.models.enums import AccountType
@@ -33,13 +35,38 @@ class Club(Base):
             ["accounts.school_id", "accounts.id"],
             name="fk_club_creator_same_school",
         ),
+        ForeignKeyConstraint(
+            ["school_id", "rolled_over_from_club_id"],
+            ["clubs.school_id", "clubs.id"],
+            name="fk_club_rollover_source_same_school",
+        ),
 
         UniqueConstraint(
             "school_id",
             "id",
             name="uq_clubs_school_id_id",
         ),
+        UniqueConstraint(
+            "school_id", "academic_year_id", "rolled_over_from_club_id",
+            name="uq_clubs_rollover_source_year",
+        ),
+        CheckConstraint(
+            "created_by IS NOT NULL OR rolled_over_from_club_id IS NOT NULL",
+            name="ck_club_creator_or_rollover",
+        ),
+        CheckConstraint(
+            "(rolled_over_from_club_id IS NULL) = (rollover_batch_id IS NULL)",
+            name="ck_club_rollover_batch",
+        ),
+        CheckConstraint(
+            "rolled_over_from_club_id IS NULL OR rolled_over_from_club_id <> id",
+            name="ck_club_rollover_distinct_source",
+        ),
         Index("ix_clubs_school_academic_year", "school_id", "academic_year_id", "id"),
+        Index(
+            "ix_clubs_rollover_batch_school", "school_id", "rollover_batch_id",
+            postgresql_where=text("rollover_batch_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -58,11 +85,13 @@ class Club(Base):
         
     )
 
-    created_by = mapped_column(
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("accounts.id"),
-        nullable=False
     )
+
+    rolled_over_from_club_id: Mapped[uuid.UUID | None]
+    rollover_batch_id: Mapped[uuid.UUID | None]
 
     name: Mapped[str] = mapped_column(
         String(150),
