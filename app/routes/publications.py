@@ -1,5 +1,5 @@
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 
 from app.config.database import get_db
@@ -16,6 +16,7 @@ router = APIRouter(
     prefix="/activities",
     tags=["Activity Publications"],
 )
+PRIVATE_HEADERS = {"Cache-Control": "private, no-store"}
 
 
 @router.get(
@@ -23,14 +24,17 @@ router = APIRouter(
     response_model=list[PublishedActivity],
 )
 def published_activities(
+    response: Response,
     limit: int = Query(default=20, ge=1, le=50),
     viewer: Account = Depends(require_account),
     db: Session = Depends(get_db),
 ):
+    response.headers.update(PRIVATE_HEADERS)
     try:
         return list_published_activities(db, viewer, limit)
     except ActivityError as exc:
         raise HTTPException(
             status_code=exc.status_code,
             detail=exc.detail,
+            headers=PRIVATE_HEADERS,
         ) from exc
