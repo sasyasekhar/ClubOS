@@ -1,8 +1,10 @@
 
+import logging
 from datetime import date
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models.account import Account
@@ -18,6 +20,9 @@ from app.models.enums import (
 )
 from app.services.academic_year_write_guard import lock_club_for_year_write, require_completion_window_open
 from app.services.club_registration import ClubRequestError
+
+
+logger = logging.getLogger(__name__)
 
 
 def check_teacher(teacher: Account):
@@ -62,6 +67,7 @@ def respond_to_invitation(
     teacher: Account,
     club_id: UUID,
     decision: str,
+    membership_id: UUID | None = None,
 ):
     check_teacher(teacher)
 
@@ -70,14 +76,15 @@ def respond_to_invitation(
         raise ClubRequestError(404, "Invitation not found.")
     club, year = locked
 
-    membership = db.scalar(
-        select(ClubMembership)
-        .where(
-            ClubMembership.club_id == club.id,
-            ClubMembership.account_id == teacher.id,
-            ClubMembership.role == ClubRole.TEACHER_REP,
-        )
-        .order_by(
+    query = select(ClubMembership).where(
+        ClubMembership.club_id == club.id,
+        ClubMembership.account_id == teacher.id,
+        ClubMembership.role == ClubRole.TEACHER_REP,
+    )
+    if membership_id is not None:
+        query = query.where(ClubMembership.id == membership_id)
+    else:
+        query = query.order_by(
             # Prefer the current invitation, including acceptance retries.
             ClubMembership.status.in_(
                 (MembershipStatus.PENDING, MembershipStatus.ACTIVE)
@@ -85,11 +92,12 @@ def respond_to_invitation(
             ClubMembership.created_at.desc(),
             ClubMembership.id.desc(),
         )
-        .limit(1)
-    )
+    membership = db.scalar(query.limit(1))
 
     if membership is None:
         raise ClubRequestError(404, "Invitation not found.")
+    if club.rolled_over_from_club_id is not None and membership_id is None:
+        raise ClubRequestError(422, "Membership ID is required to reply to this invitation.")
 
     if club.status in (ClubStatus.REJECTED, ClubStatus.ARCHIVED):
         raise ClubRequestError(409, "Club is not accepting invitations.")
@@ -115,6 +123,15 @@ def respond_to_invitation(
         raise ClubRequestError(409, "Academic year is not active.")
 
     try:
+        if club.rolled_over_from_club_id is not None:
+            active_teacher = db.scalar(select(Account.id).where(
+                Account.id == teacher.id,
+                Account.school_id == club.school_id,
+                Account.account_type == AccountType.TEACHER,
+                Account.is_active.is_(True),
+            ).with_for_update(read=True))
+            if active_teacher is None:
+                raise ClubRequestError(403, "Permission denied.")
         require_completion_window_open(db, year, ClubRequestError)
         membership.status = target
 
@@ -134,6 +151,10 @@ def respond_to_invitation(
         ))
 
         db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.error("Teacher invitation response failed (%s)", type(exc).__name__)
+        raise ClubRequestError(503, "Teacher invitation response is temporarily unavailable.") from exc
     except Exception:
         db.rollback()
         raise

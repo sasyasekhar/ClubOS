@@ -1,7 +1,7 @@
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 from sqlalchemy.orm import Session
 
 from app.config.database import get_db
@@ -23,6 +23,7 @@ from app.services.club_resubmission import resubmit_club
 
 
 from app.schemas.teacher_invitation import (
+    EligibleTeachersPage,
     TeacherInvitationDecision,
     TeacherInvitationResponse,
     PendingTeacherInvitation,
@@ -34,7 +35,7 @@ from app.services.teacher_invitation import (
 
 from pydantic import BaseModel
 from app.models.enums import MembershipStatus
-from app.services.teacher_replacement import replace_declined_teacher
+from app.services.teacher_replacement import list_eligible_teachers, replace_declined_teacher, select_rollover_teacher
 
 
 from app.schemas.membership import (
@@ -48,6 +49,7 @@ from app.services.representative_memberships import (
 
 
 router = APIRouter(prefix="/clubs", tags=["Clubs"])
+PRIVATE_HEADERS = {"Cache-Control": "private, no-store"}
 
 
 @router.post(
@@ -142,7 +144,7 @@ def reply_to_teacher_invitation(
 ):
     try:
         return respond_to_invitation(
-            db, teacher, club_id, payload.decision
+            db, teacher, club_id, payload.decision, payload.membership_id
         )
     except ClubRequestError as exc:
         raise HTTPException(
@@ -159,6 +161,42 @@ class TeacherReplacementResponse(BaseModel):
     membership_id: UUID
     teacher_account_id: UUID
     status: MembershipStatus
+
+
+@router.get("/{club_id}/eligible-teachers", response_model=EligibleTeachersPage)
+def browse_eligible_teachers(
+    club_id: UUID,
+    response: Response,
+    limit: int = Query(default=20, ge=1, le=50),
+    after: UUID | None = None,
+    student: Account = Depends(require_roles(AccountType.STUDENT)),
+    db: Session = Depends(get_db),
+):
+    response.headers.update(PRIVATE_HEADERS)
+    try:
+        return list_eligible_teachers(db, student, club_id, limit=limit, after=after)
+    except ClubRequestError as exc:
+        raise HTTPException(exc.status_code, exc.detail, headers=PRIVATE_HEADERS) from exc
+
+
+@router.post(
+    "/{club_id}/select-teacher",
+    response_model=TeacherReplacementResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def select_teacher_for_rollover(
+    club_id: UUID,
+    payload: TeacherReplacementRequest,
+    response: Response,
+    idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    student: Account = Depends(require_roles(AccountType.STUDENT)),
+    db: Session = Depends(get_db),
+):
+    response.headers.update(PRIVATE_HEADERS)
+    try:
+        return select_rollover_teacher(db, student, club_id, payload.teacher_account_id, idempotency_key)
+    except ClubRequestError as exc:
+        raise HTTPException(exc.status_code, exc.detail, headers=PRIVATE_HEADERS) from exc
 
 
 @router.post(

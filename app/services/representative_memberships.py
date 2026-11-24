@@ -20,6 +20,7 @@ from app.models.enums import (
 )
 from app.services.academic_year_write_guard import lock_club_for_year_write, require_completion_window_open
 from app.services.club_registration import ClubRequestError
+from app.services.representative_applications import selected_representative_account_id
 
 
 def membership_result(membership):
@@ -182,10 +183,10 @@ def rejoin_representative(
         raise ClubRequestError(409, "Account is unavailable.")
 
     if old.role == ClubRole.STUDENT_REP:
-        if (
-            account.account_type != AccountType.STUDENT
-            or account.id != club.created_by
-        ):
+        student_id = club.created_by
+        if club.rolled_over_from_club_id is not None:
+            student_id = selected_representative_account_id(db, club)
+        if account.account_type != AccountType.STUDENT or account.id != student_id:
             raise ClubRequestError(409, "Student is not eligible.")
         new_status = MembershipStatus.ACTIVE
 

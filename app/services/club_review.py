@@ -1,8 +1,10 @@
 
+import logging
 from datetime import date
 from uuid import UUID, NAMESPACE_URL, uuid5
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models.account import Account
@@ -22,7 +24,10 @@ from app.models.enums import (
 from app.schemas.club import ClubReviewRequest
 from app.services.academic_year_write_guard import lock_club_for_year_write, require_completion_window_open
 from app.services.club_registration import ClubRequestError
+from app.services.representative_applications import selected_representative_account_id
 
+
+logger = logging.getLogger(__name__)
 
 STATUS_MAP = {
     ClubReviewDecision.APPROVED: ClubStatus.ACTIVE,
@@ -94,22 +99,42 @@ def review_club(
             409, "Club is not awaiting review."
         )
 
-    if club.rolled_over_from_club_id is not None and club.created_by is None:
-        raise ClubRequestError(409, "This carried-forward club is awaiting fresh representative assignments.")
+    student_id = club.created_by
+    if club.rolled_over_from_club_id is not None:
+        student_id = selected_representative_account_id(db, club)
+        if student_id is None:
+            raise ClubRequestError(409, "This carried-forward club is awaiting fresh representative assignments.")
+        if data.decision != ClubReviewDecision.APPROVED:
+            raise ClubRequestError(409, "Only activation can be reviewed for a carried-forward club.")
 
     if data.decision == ClubReviewDecision.APPROVED:
-        student = db.get(Account, club.created_by)
+        student = db.scalar(select(Account).where(
+            Account.id == student_id,
+            Account.school_id == club.school_id,
+            Account.account_type == AccountType.STUDENT,
+            Account.is_active.is_(True),
+        ).with_for_update(read=True))
 
-        if (
-            year.status != AcademicYearStatus.ACTIVE
-            or student is None
-            or student.school_id != club.school_id
-            or student.account_type != AccountType.STUDENT
-            or not student.is_active
-        ):
+        if year.status != AcademicYearStatus.ACTIVE or student is None:
             raise ClubRequestError(
                 409, "Club cannot be approved in its current state."
             )
+        if club.rolled_over_from_club_id is not None:
+            accepted_teacher = db.scalar(
+                select(Account.id)
+                .join(ClubMembership, ClubMembership.account_id == Account.id)
+                .where(
+                    ClubMembership.club_id == club.id,
+                    ClubMembership.role == ClubRole.TEACHER_REP,
+                    ClubMembership.status == MembershipStatus.ACTIVE,
+                    Account.school_id == club.school_id,
+                    Account.account_type == AccountType.TEACHER,
+                    Account.is_active.is_(True),
+                )
+                .with_for_update(read=True, of=Account)
+            )
+            if accepted_teacher is None:
+                raise ClubRequestError(409, "The teacher representative must accept the invitation before activation.")
     elif year.status != AcademicYearStatus.ACTIVE:
         raise ClubRequestError(409, "Academic year is not active.")
 
@@ -145,6 +170,10 @@ def review_club(
         club.status = STATUS_MAP[data.decision]
         db.add_all([review, audit])
         db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.error("Club review failed (%s)", type(exc).__name__)
+        raise ClubRequestError(503, "Club review is temporarily unavailable.") from exc
     except Exception:
         db.rollback()
         raise
