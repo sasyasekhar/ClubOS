@@ -19,6 +19,7 @@ from app.models.activity import Activity
 from app.models.activity_attachment import ActivityAttachment
 from app.models.activity_review import ActivityReview
 from app.models.activity_revision import ActivityRevision
+from app.models.audit_log import AuditLog
 from app.models.club import Club
 from app.models.club_membership import ClubMembership
 from app.models.enums import (
@@ -63,6 +64,24 @@ DEADLINE_ERROR = {
 ACTIVITY_DETAILS = ActivityDraftCreate(
     title="Updated workshop", activity_date=REQUESTED_AT.date(), category="STEM", description="Workshop details",
 )
+ACTIVITY_MUTATION_CASES = [
+    ("create", ActivityRevisionStatus.DRAFT),
+    ("edit", ActivityRevisionStatus.DRAFT),
+    ("submit", ActivityRevisionStatus.DRAFT),
+    ("correction", ActivityRevisionStatus.CHANGES_REQUESTED),
+    ("replacement", ActivityRevisionStatus.APPROVED),
+    ("upload", ActivityRevisionStatus.DRAFT),
+    *((decision, ActivityRevisionStatus.PENDING) for decision in ActivityReviewDecision),
+]
+CLUB_MUTATION_CASES = [
+    ("register", ClubStatus.ACTIVE, MembershipStatus.ACTIVE),
+    ("review", ClubStatus.PENDING, MembershipStatus.ACTIVE),
+    ("resubmit", ClubStatus.CHANGES_REQUESTED, MembershipStatus.ACTIVE),
+    ("invitation", ClubStatus.ACTIVE, MembershipStatus.PENDING),
+    ("replace_teacher", ClubStatus.ACTIVE, MembershipStatus.DECLINED),
+    ("end", ClubStatus.ACTIVE, MembershipStatus.ACTIVE),
+    ("rejoin", ClubStatus.ACTIVE, MembershipStatus.ENDED),
+]
 
 
 @pytest.fixture
@@ -130,15 +149,7 @@ def activity_writer(db, scenario, operation, *, key, storage):
     return writes[operation]()
 
 
-@pytest.mark.parametrize("operation,initial_status", [
-    ("create", ActivityRevisionStatus.DRAFT),
-    ("edit", ActivityRevisionStatus.DRAFT),
-    ("submit", ActivityRevisionStatus.DRAFT),
-    ("correction", ActivityRevisionStatus.CHANGES_REQUESTED),
-    ("replacement", ActivityRevisionStatus.APPROVED),
-    ("upload", ActivityRevisionStatus.DRAFT),
-    *((decision, ActivityRevisionStatus.PENDING) for decision in ActivityReviewDecision),
-])
+@pytest.mark.parametrize("operation,initial_status", ACTIVITY_MUTATION_CASES)
 @pytest.mark.parametrize("now", [JUST_BEFORE_DEADLINE, DEADLINE, DEADLINE + timedelta(microseconds=1)])
 def test_activity_mutations_use_the_completion_window(scenario, window, clock, operation, initial_status, now):
     target = scenario.first
@@ -210,16 +221,7 @@ def test_finalized_window_stays_frozen_if_database_clock_moves_backward(scenario
     assert (error.value.status_code, error.value.detail) == (409, DEADLINE_ERROR)
 
 
-@pytest.mark.parametrize("operation,club_status,teacher_membership_status", [
-    ("register", ClubStatus.ACTIVE, MembershipStatus.ACTIVE),
-    ("review", ClubStatus.PENDING, MembershipStatus.ACTIVE),
-    ("resubmit", ClubStatus.CHANGES_REQUESTED, MembershipStatus.ACTIVE),
-    ("invitation", ClubStatus.ACTIVE, MembershipStatus.PENDING),
-    ("replace_teacher", ClubStatus.ACTIVE, MembershipStatus.DECLINED),
-    ("end", ClubStatus.ACTIVE, MembershipStatus.ACTIVE),
-    ("rejoin", ClubStatus.ACTIVE, MembershipStatus.ENDED),
-])
-def test_club_management_mutations_stop_at_cutoff(scenario, window, clock, operation, club_status, teacher_membership_status):
+def prepare_club_mutation(scenario, club_status, teacher_membership_status):
     club_id = scenario.first.club_id
     with SessionLocal.begin() as db:
         db.get(Club, club_id).status = club_status
@@ -227,27 +229,90 @@ def test_club_management_mutations_stop_at_cutoff(scenario, window, clock, opera
             ClubMembership.club_id == club_id, ClubMembership.role == ClubRole.TEACHER_REP,
         ))
         teacher_membership.status = teacher_membership_status
-        teacher_membership_id = teacher_membership.id
+        return teacher_membership.id
 
+
+def club_writer(db, scenario, operation, teacher_membership_id):
+    club_id = scenario.first.club_id
+    student = db.get(Account, scenario.student_id)
+    teacher = db.get(Account, scenario.teacher_id)
+    admin = db.get(Account, scenario.admin_id)
+    payload = ClubRegistrationRequest(name="Robotics club", category="STEM", teacher_account_id=teacher.id)
+    review = ClubReviewRequest(decision=ClubReviewDecision.REJECTED, comments="Please submit a new request.")
+    writes = {
+        "register": lambda: register_club(db, student, payload, uuid4()),
+        "review": lambda: review_club(db, admin, club_id, review, uuid4()),
+        "resubmit": lambda: resubmit_club(db, student, club_id, payload, uuid4()),
+        "invitation": lambda: respond_to_invitation(db, teacher, club_id, "ACCEPT"),
+        "replace_teacher": lambda: replace_declined_teacher(db, student, club_id, teacher.id, uuid4()),
+        "end": lambda: end_representative(db, admin, club_id, teacher_membership_id, uuid4(), None),
+        "rejoin": lambda: rejoin_representative(db, admin, club_id, teacher_membership_id, uuid4()),
+    }
+    return writes[operation]()
+
+
+@pytest.mark.parametrize("operation,club_status,teacher_membership_status", CLUB_MUTATION_CASES)
+def test_club_management_mutations_stop_at_cutoff(scenario, window, clock, operation, club_status, teacher_membership_status):
+    teacher_membership_id = prepare_club_mutation(scenario, club_status, teacher_membership_status)
     clock.now = DEADLINE
+    with SessionLocal() as db, pytest.raises(ClubRequestError) as exc:
+        club_writer(db, scenario, operation, teacher_membership_id)
+    assert (exc.value.status_code, exc.value.detail) == (409, DEADLINE_ERROR)
+
+
+def put_target_in_history(scenario, state):
+    with SessionLocal.begin() as db:
+        year = db.get(AcademicYear, scenario.year_id)
+        year.status = AcademicYearStatus.CLOSED
+        if state == AcademicYearStatus.ARCHIVED:
+            # Legacy archived fixtures have no export receipt or archived timestamp.
+            archived = AcademicYear(
+                school_id=scenario.school_id, name="Archived fixture", status=state,
+                start_date=year.start_date, end_date=year.end_date,
+            )
+            db.add(archived)
+            db.flush()
+            db.get(Club, scenario.first.club_id).academic_year_id = archived.id
+
+
+@pytest.mark.parametrize("state", [AcademicYearStatus.CLOSED, AcademicYearStatus.ARCHIVED])
+@pytest.mark.parametrize("operation,initial_status", ACTIVITY_MUTATION_CASES)
+def test_historical_activity_mutations_preserve_records(scenario, state, operation, initial_status):
+    target = scenario.first
+    with SessionLocal.begin() as db:
+        revision = db.get(ActivityRevision, target.revision_id)
+        revision.status = initial_status
+        revision.is_published = initial_status == ActivityRevisionStatus.APPROVED
+    put_target_in_history(scenario, state)
+
+    with SessionLocal() as db, pytest.raises(ActivityError) as exc:
+        activity_writer(db, scenario, operation, key=uuid4(), storage=MemoryAttachmentStorage())
+    assert exc.value.status_code == 409
+
     with SessionLocal() as db:
-        student = db.get(Account, scenario.student_id)
-        teacher = db.get(Account, scenario.teacher_id)
-        admin = db.get(Account, scenario.admin_id)
-        payload = ClubRegistrationRequest(name="Robotics club", category="STEM", teacher_account_id=teacher.id)
-        review = ClubReviewRequest(decision=ClubReviewDecision.REJECTED, comments="Please submit a new request.")
-        writes = {
-            "register": lambda: register_club(db, student, payload, uuid4()),
-            "review": lambda: review_club(db, admin, club_id, review, uuid4()),
-            "resubmit": lambda: resubmit_club(db, student, club_id, payload, uuid4()),
-            "invitation": lambda: respond_to_invitation(db, teacher, club_id, "ACCEPT"),
-            "replace_teacher": lambda: replace_declined_teacher(db, student, club_id, teacher.id, uuid4()),
-            "end": lambda: end_representative(db, admin, club_id, teacher_membership_id, uuid4(), None),
-            "rejoin": lambda: rejoin_representative(db, admin, club_id, teacher_membership_id, uuid4()),
-        }
-        with pytest.raises(ClubRequestError) as exc:
-            writes[operation]()
-        assert (exc.value.status_code, exc.value.detail) == (409, DEADLINE_ERROR)
+        revision, = db.scalars(select(ActivityRevision).where(ActivityRevision.activity_id == target.activity_id)).all()
+        assert (revision.id, revision.status, revision.title) == (target.revision_id, initial_status, "Robotics workshop")
+        assert db.scalar(select(ActivityAttachment.id).where(ActivityAttachment.revision_id == revision.id)) is None
+        assert db.scalar(select(ActivityReview.id).where(ActivityReview.revision_id == revision.id)) is None
+        assert db.scalar(select(AuditLog.id).where(AuditLog.actor_account_id.in_((scenario.student_id, scenario.teacher_id)))) is None
+
+
+@pytest.mark.parametrize("state", [AcademicYearStatus.CLOSED, AcademicYearStatus.ARCHIVED])
+@pytest.mark.parametrize("operation,club_status,teacher_membership_status", CLUB_MUTATION_CASES)
+def test_historical_club_mutations_preserve_records(scenario, state, operation, club_status, teacher_membership_status):
+    membership_id = prepare_club_mutation(scenario, club_status, teacher_membership_status)
+    put_target_in_history(scenario, state)
+
+    with SessionLocal() as db, pytest.raises(ClubRequestError) as exc:
+        club_writer(db, scenario, operation, membership_id)
+    assert exc.value.status_code == 409
+
+    with SessionLocal() as db:
+        assert db.get(Club, scenario.first.club_id).status == club_status
+        assert db.get(ClubMembership, membership_id).status == teacher_membership_status
+        assert db.scalars(select(AuditLog.id).where(
+            AuditLog.actor_account_id.in_((scenario.student_id, scenario.teacher_id, scenario.admin_id)),
+        )).all() == []
 
 
 @pytest.mark.parametrize("holding", ["year", "club", "revision"])
