@@ -54,10 +54,12 @@ def token_hash(cookie_token, tab_key):
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def record_failed_login(db: Session, identifier: str):
+def record_failed_login(db: Session, client_key: str, identifier_key: str):
     db.add(LoginHistory(
-        attempted_identifier=identifier[:255],
+        client_key=client_key,
+        identifier_key=identifier_key,
         outcome=LoginOutcome.FAILED,
+        occurred_at=database_now(db),
     ))
     db.commit()
 

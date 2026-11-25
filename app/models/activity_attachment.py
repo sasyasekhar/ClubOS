@@ -30,6 +30,7 @@ class ActivityAttachment(Base):
             )""",
             name="ck_attachment_upload_metadata",
         ),
+        CheckConstraint("scan_passed_at IS NULL OR content_sha256 IS NOT NULL", name="ck_attachment_scan_metadata"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -62,6 +63,7 @@ class ActivityAttachment(Base):
     idempotency_key: Mapped[uuid.UUID | None]
     size_bytes: Mapped[int | None]
     content_sha256: Mapped[str | None] = mapped_column(String(64))
+    scan_passed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     uploaded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

@@ -200,7 +200,7 @@ def get_dashboard_revision(
     attachments = _page(
         db, select(
             ActivityAttachment.id, ActivityAttachment.revision_id, ActivityAttachment.file_name, ActivityAttachment.file_type,
-        ).where(ActivityAttachment.revision_id == revision_id, ActivityAttachment.size_bytes.is_not(None)),
+        ).where(ActivityAttachment.revision_id == revision_id, ActivityAttachment.scan_passed_at.is_not(None)),
         ActivityAttachment.id, ActivityAttachmentResponse, query.limit, query.attachments_after,
     )
     reviews = _page(

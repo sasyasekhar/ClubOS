@@ -44,6 +44,7 @@ from app.routes.auth import COOKIE_NAME, require_account
 from app.services import activity_attachments
 from app.services.activity_attachments import reconcile_orphaned_upload
 from app.services.attachment_policy import MAX_FILE_SIZE
+from app.services.attachment_scanning import ScanVerdict, get_attachment_scanner
 from app.services.revision_retention import purge_expired_superseded_content
 from app.services.sessions import IDLE_TIMEOUT, token_hash
 from app.services.storage import ObjectMissing, StorageError, get_attachment_storage
@@ -233,6 +234,35 @@ def upload(
         headers={**scenario.auth(actor), "Idempotency-Key": str(key or uuid4())},
         files={"file": (name, sample_pdf() if content is None else content, "application/pdf")},
     )
+
+
+@pytest.mark.parametrize("result,expected", [(ScanVerdict.UNSAFE, 422), (None, 503), (TimeoutError(), 503)])
+def test_scan_failure_keeps_unverified_content_out_of_storage(client, scenario, storage, monkeypatch, result, expected):
+    scanner = None if result is None else Mock()
+    if scanner is not None:
+        if isinstance(result, Exception):
+            scanner.scan.side_effect = result
+        else:
+            scanner.scan.return_value = result
+    monkeypatch.setitem(app.dependency_overrides, get_attachment_scanner, lambda: scanner)
+    denied = upload(client, scenario)
+    assert denied.status_code == expected, denied.text
+    assert attachments(scenario) == [] and list(storage.iter_keys("activity-attachments")) == []
+
+
+def test_verified_upload_replays_and_unscanned_file_is_quarantined(client, scenario, monkeypatch):
+    key = uuid4()
+    created = upload(client, scenario, key=key)
+    assert created.status_code == 201, created.text
+    attachment, = attachments(scenario)
+    assert attachment.scan_passed_at is not None
+    monkeypatch.setitem(app.dependency_overrides, get_attachment_scanner, lambda: None)
+    assert upload(client, scenario, key=key).json() == created.json()
+    assert len(attachments(scenario)) == 1
+    with SessionLocal.begin() as db:
+        db.get(ActivityAttachment, attachment.id).scan_passed_at = None
+    assert client.get(scenario.attachment_url(attachment.id), headers=scenario.auth()).status_code == 404
+    assert upload(client, scenario, key=key).status_code == 409
 
 
 def attachments(

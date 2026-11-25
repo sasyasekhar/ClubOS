@@ -24,6 +24,7 @@ from app.schemas.activity import (
 )
 from app.schemas.dashboard import DashboardRevisionDetail, RevisionDetailQuery
 from app.security.permissions import require_roles
+from app.security.requests import MAX_ATTACHMENT_REQUEST_SIZE
 from app.services.activity_attachments import AttachmentDownload, download_attachment, upload_attachment
 from app.services.activity_corrections import create_corrected_draft
 from app.services.activity_drafts import (
@@ -36,7 +37,7 @@ from app.services.activity_workflow import (
     edit_activity_draft,
     submit_activity_draft,
 )
-from app.services.attachment_policy import MAX_FILE_SIZE
+from app.services.attachment_scanning import AttachmentScanner, get_attachment_scanner
 from app.services.dashboard import get_dashboard_revision
 from app.services.storage import AttachmentStorage, get_attachment_storage
 
@@ -47,7 +48,6 @@ router = APIRouter(
 
 REVISION_PATH = "/{club_id}/activities/{activity_id}/revisions/{revision_id}"
 ATTACHMENTS_PATH = REVISION_PATH + "/attachments"
-MAX_ATTACHMENT_REQUEST_SIZE = MAX_FILE_SIZE + 64 * 1024  # Multipart framing and headers.
 PRIVATE_DOWNLOAD_HEADERS = {
     "Cache-Control": "private, no-store",
     "X-Content-Type-Options": "nosniff",
@@ -280,6 +280,7 @@ async def add_activity_attachment(
     student: Account = Depends(require_roles(AccountType.STUDENT)),
     db: Session = Depends(get_db),
     storage: AttachmentStorage = Depends(get_attachment_storage),
+    scanner: AttachmentScanner | None = Depends(get_attachment_scanner),
 ) -> ActivityAttachmentResponse:
     media_type, _ = parse_options_header(request.headers.get("content-type", ""))
     if media_type != b"multipart/form-data":
@@ -313,6 +314,7 @@ async def add_activity_attachment(
             file.filename or "",
             file.content_type or "",
             file.file,
+            scanner=scanner,
         )
     except ActivityError as exc:
         raise HTTPException(exc.status_code, exc.detail) from exc

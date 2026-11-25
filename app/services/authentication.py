@@ -1,4 +1,5 @@
 
+from pwdlib.exceptions import HashVerificationError, UnknownHashError
 from sqlalchemy import select, func, or_
 from sqlalchemy.orm import Session
 
@@ -21,7 +22,8 @@ def authenticate_account(
 ) -> Account:
     normalized = identifier.strip().lower()
 
-    if not normalized or not password:
+    if not normalized or "\x00" in normalized or not password:
+        verify_password(password, _DUMMY_HASH)
         raise InvalidCredentials()
 
     accounts = db.scalars(
@@ -41,9 +43,11 @@ def authenticate_account(
 
     account = accounts[0]
 
-    valid_password = verify_password(
-        password, account.password_hash
-    )
+    try:
+        valid_password = verify_password(password, account.password_hash)
+    except (HashVerificationError, UnknownHashError):
+        verify_password(password, _DUMMY_HASH)
+        raise InvalidCredentials() from None
 
     if not valid_password or not account.is_active:
         raise InvalidCredentials()

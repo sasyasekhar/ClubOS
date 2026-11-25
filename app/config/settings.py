@@ -11,9 +11,11 @@ class Settings(BaseSettings):
     DB_USER: str = "clubos_user"
     DB_PASSWORD: str
     COOKIE_SECURE: bool = False
+    PUBLIC_ORIGIN: str | None = None
     APP_ENV: Literal["development", "test", "production"] = "development"
     ATTACHMENT_STORAGE_BACKEND: Literal["local"] = "local"
     ATTACHMENT_STORAGE_DIRECTORY: Path = Path(".clubos-attachments")
+    ATTACHMENT_SCAN_SOCKET: Path | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -31,6 +31,7 @@ from app.services.authentication import (
     authenticate_account,
     InvalidCredentials,
 )
+from app.services.login_throttling import LoginThrottled, WINDOW_SECONDS, lock_login_attempt
 from app.services.sessions import (
     AuthenticationContext,
     ImpersonationRestricted,
@@ -169,10 +170,12 @@ def _resolve_auth_context(request: Request, db: Session, tab_key: str | None, *,
 @router.post("/login", response_model=LoginResponse, dependencies=[Depends(reject_impersonation_on_public_route)])
 def login(
     payload: LoginRequest,
+    request: Request,
     response: Response,
     db: Session = Depends(get_db),
 ):
     try:
+        client, identifier = lock_login_attempt(db, payload.identifier, request.client.host if request.client else "unknown")
         account = authenticate_account(
             db, payload.identifier, payload.password
         )
@@ -182,11 +185,17 @@ def login(
             if school is None or not school.is_active:
                 raise InvalidCredentials()
 
+    except LoginThrottled as exc:
+        raise HTTPException(
+            429, "Too many login attempts. Try again later.",
+            headers={**PRIVATE_HEADERS, "Retry-After": str(WINDOW_SECONDS)},
+        ) from exc
     except InvalidCredentials:
-        record_failed_login(db, payload.identifier)
+        record_failed_login(db, client, identifier)
         raise HTTPException(
             status_code=401,
             detail="Invalid credentials",
+            headers=PRIVATE_HEADERS,
         )
 
     cookie_token, tab_key = create_session(
@@ -197,7 +206,7 @@ def login(
         key=COOKIE_NAME,
         value=cookie_token,
         httponly=True,
-        secure=settings.COOKIE_SECURE,
+        secure=settings.COOKIE_SECURE or settings.APP_ENV == "production",
         samesite="lax",
         path="/",
     )
@@ -250,4 +259,5 @@ def logout(
         raise _authentication_unavailable(db, exc) from exc
 
     response.headers.update(PRIVATE_HEADERS)
-    response.delete_cookie(COOKIE_NAME, path="/", samesite="lax")
+    response.delete_cookie(COOKIE_NAME, path="/", samesite="lax", httponly=True,
+                           secure=settings.COOKIE_SECURE or settings.APP_ENV == "production")

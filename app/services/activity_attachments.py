@@ -28,6 +28,7 @@ from app.services.attachment_policy import (
     require_uploadable_revision,
     validate_attachment,
 )
+from app.services.attachment_scanning import AttachmentScanner, ScannerUnavailable, ScanVerdict
 from app.services.storage import AttachmentStorage, ObjectMissing, StorageError
 
 
@@ -70,6 +71,8 @@ def upload_attachment(
     filename: str,
     content_type: str,
     file: BinaryIO,
+    *,
+    scanner: AttachmentScanner | None = None,
 ) -> ActivityAttachmentResponse:
     storage_key_to_remove = None
     try:
@@ -96,12 +99,16 @@ def upload_attachment(
                 or existing.content_sha256 != content_hash
             ):
                 raise ActivityError(409, "Idempotency key conflict.")
+            if existing.scan_passed_at is None:
+                raise ActivityError(409, "Existing attachment has not passed scanning.")
             result = _upload_response(existing)
             db.rollback()
             return result
 
         require_completion_window_open(db, year, ActivityError)
         validated = validate_attachment(filename, content_type, content)
+        _require_clean_scan(scanner, content)
+        scan_passed_at = require_completion_window_open(db, year, ActivityError)
         attachment_id = uuid4()
         attachment = ActivityAttachment(
             id=attachment_id,
@@ -112,6 +119,7 @@ def upload_attachment(
             idempotency_key=idempotency_key,
             size_bytes=validated.size,
             content_sha256=content_hash,
+            scan_passed_at=scan_passed_at,
         )
         db.add(attachment)
         # Reject immediate database constraints before touching storage. Every
@@ -152,6 +160,19 @@ def upload_attachment(
                     "Attachment upload needs orphan reconciliation for revision %s", revision_id
                 )
         raise ActivityError(503, "Attachment upload is temporarily unavailable.") from exc
+
+
+def _require_clean_scan(scanner: AttachmentScanner | None, content: bytes) -> None:
+    if scanner is None:
+        raise ActivityError(503, "Attachment scanner is unavailable.")
+    try:
+        verdict = scanner.scan(content)
+    except (ScannerUnavailable, OSError) as exc:
+        raise ActivityError(503, "Attachment scanner is unavailable.") from exc
+    if verdict is ScanVerdict.UNSAFE:
+        raise ActivityError(422, "Attachment did not pass the security scan.")
+    if verdict is not ScanVerdict.CLEAN:
+        raise ActivityError(503, "Attachment scanner is unavailable.")
 
 
 def _upload_response(attachment: ActivityAttachment) -> ActivityAttachmentResponse:
@@ -230,7 +251,7 @@ def load_activity_attachment(
                 ActivityAttachment.revision_id == revision.id,
             )
         )
-        if attachment is None or not has_managed_object(attachment):
+        if attachment is None or attachment.scan_passed_at is None or not has_managed_object(attachment):
             raise ActivityError(404, "Attachment not found.")
 
         if (

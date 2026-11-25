@@ -49,7 +49,7 @@ from app.services.representative_memberships import end_representative, rejoin_r
 from app.services.storage.memory import MemoryAttachmentStorage
 from app.services.teacher_invitation import respond_to_invitation
 from app.services.teacher_replacement import replace_declined_teacher
-from attachment_samples import sample_pdf
+from attachment_samples import CleanAttachmentScanner, sample_pdf
 from test_academic_year_write_guard import lock_year, prepare_transaction, scenario, wait_for_blocking
 
 
@@ -143,7 +143,7 @@ def activity_writer(db, scenario, operation, *, key, storage):
         "replacement": lambda: create_replacement_draft(*args, ACTIVITY_DETAILS, key),
         "upload": lambda: upload_attachment(
             db, storage, student, target.club_id, target.activity_id, target.revision_id,
-            key, "report.pdf", "application/pdf", BytesIO(sample_pdf()),
+            key, "report.pdf", "application/pdf", BytesIO(sample_pdf()), scanner=CleanAttachmentScanner(),
         ),
     }
     return writes[operation]()
@@ -210,6 +210,28 @@ def test_existing_activity_writes_can_be_replayed_at_cutoff(scenario, window, cl
     clock.now = DEADLINE
     with SessionLocal() as db:
         assert activity_writer(db, scenario, operation, key=key, storage=storage) == first
+
+
+def test_upload_rechecks_the_completion_window_after_scanning(scenario, window, clock):
+    target = scenario.first
+    with SessionLocal.begin() as db:
+        revision = db.get(ActivityRevision, target.revision_id)
+        revision.status = ActivityRevisionStatus.DRAFT
+        revision.is_published = False
+
+    class BoundaryScanner(CleanAttachmentScanner):
+        def scan(self, content):
+            clock.now = DEADLINE
+            return super().scan(content)
+
+    storage = MemoryAttachmentStorage()
+    with SessionLocal() as db, pytest.raises(ActivityError) as error:
+        upload_attachment(
+            db, storage, db.get(Account, scenario.student_id), target.club_id, target.activity_id, target.revision_id,
+            uuid4(), "report.pdf", "application/pdf", BytesIO(sample_pdf()), scanner=BoundaryScanner(),
+        )
+    assert (error.value.status_code, error.value.detail) == (409, DEADLINE_ERROR)
+    assert not storage.iter_keys("activity-attachments")
 
 
 def test_finalized_window_stays_frozen_if_database_clock_moves_backward(scenario, window, clock):

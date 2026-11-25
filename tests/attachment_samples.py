@@ -3,6 +3,13 @@ from binascii import crc32
 from struct import pack
 from zlib import compress
 
+from app.services.attachment_scanning import ScanVerdict
+
+
+class CleanAttachmentScanner:
+    def scan(self, content: bytes) -> ScanVerdict:
+        return ScanVerdict.CLEAN
+
 
 def sample_pdf(label: str = "Hello") -> bytes:
     escaped_label = (

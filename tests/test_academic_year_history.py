@@ -89,6 +89,7 @@ def add_attachment(db, storage, publication):
         id=attachment_id, revision_id=publication.revision_id, file_name="report.pdf", storage_key=key,
         file_type="application/pdf", idempotency_key=uuid4(), size_bytes=len(content),
         content_sha256=sha256(content).hexdigest(),
+        scan_passed_at=datetime.now(timezone.utc),
     ))
     return publication.attachment_url(attachment_id)
 
