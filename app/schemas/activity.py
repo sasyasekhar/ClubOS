@@ -1,8 +1,8 @@
 
-from datetime import date
+from datetime import date, datetime
 from uuid import UUID
 
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from typing import Annotated
 
 from app.models.enums import ActivityRevisionStatus
@@ -38,10 +38,34 @@ class ActivityDraftResponse(BaseModel):
 
 
 class ActivityAttachmentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: UUID
     revision_id: UUID
     file_name: str
     file_type: str
+
+
+class RestorePreviousVersionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision_id: UUID
+
+
+class PreviousActivityVersion(BaseModel):
+    activity_id: UUID
+    current_revision_id: UUID
+    revision_id: UUID
+    revision_number: int
+    title: str
+    description: str
+    category: str
+    activity_date: date
+    published_at: datetime | None
+    superseded_at: datetime
+    recovery_expires_at: datetime
+    attachments: list[ActivityAttachmentResponse]
+    unavailable_attachment_count: int
 
 
 class ActivityReviewRequest(BaseModel):

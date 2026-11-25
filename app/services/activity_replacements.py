@@ -19,6 +19,23 @@ from app.services.activity_workflow import (
 from app.services.operation_receipts import find_receipt, stage_receipt
 
 
+def next_replacement_number(
+    db: Session, activity_id: UUID, *, unfinished_detail: str | dict[str, str] = "Another revision needs to be completed first.",
+) -> int:
+    latest = db.execute(select(ActivityRevision.revision_number, ActivityRevision.status).where(
+        ActivityRevision.activity_id == activity_id,
+    ).order_by(ActivityRevision.revision_number.desc()).limit(1)).one_or_none()
+    if latest is None:
+        raise ActivityError(404, "Activity revision not found.")
+    unfinished = db.scalar(select(ActivityRevision.id).where(
+        ActivityRevision.activity_id == activity_id,
+        ActivityRevision.status.in_((ActivityRevisionStatus.DRAFT, ActivityRevisionStatus.PENDING)),
+    ).limit(1))
+    if unfinished is not None or latest.status == ActivityRevisionStatus.CHANGES_REQUESTED:
+        raise ActivityError(409, unfinished_detail)
+    return latest.revision_number + 1
+
+
 def create_replacement_draft(
     db: Session,
     student: Account,
@@ -60,29 +77,10 @@ def create_replacement_draft(
         ):
             raise ActivityError(409, "Source is not published.")
 
-        latest = db.scalar(
-            select(ActivityRevision)
-            .where(ActivityRevision.activity_id == activity_id)
-            .order_by(ActivityRevision.revision_number.desc())
-            .limit(1)
-        )
-
-        if latest is None:
-            raise ActivityError(404, "Activity revision not found.")
-
-        if latest.status in (
-            ActivityRevisionStatus.DRAFT,
-            ActivityRevisionStatus.PENDING,
-            ActivityRevisionStatus.CHANGES_REQUESTED,
-        ):
-            raise ActivityError(
-                409, "Another revision needs to be completed first."
-            )
-
         revision = ActivityRevision(
             id=new_id,
             activity_id=activity_id,
-            revision_number=latest.revision_number + 1,
+            revision_number=next_replacement_number(db, activity_id),
             title=data.title,
             activity_date=data.activity_date,
             description=data.description,

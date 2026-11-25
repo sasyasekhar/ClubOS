@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import BinaryIO
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -19,7 +19,7 @@ from app.models.enums import AccountType, ClubRole, MembershipStatus
 from app.schemas.activity import ActivityAttachmentResponse
 from app.services.academic_year_write_guard import require_completion_window_open
 from app.services.activity_drafts import ActivityError
-from app.services.activity_workflow import authorized_revision
+from app.services.activity_workflow import authorized_revision, previous_publication, recovery_deadline
 from app.services.attachment_policy import (
     ALLOWED_TYPES,
     MAX_FILE_SIZE,
@@ -29,6 +29,7 @@ from app.services.attachment_policy import (
     validate_attachment,
 )
 from app.services.attachment_scanning import AttachmentScanner, ScannerUnavailable, ScanVerdict
+from app.services.sessions import database_now
 from app.services.storage import AttachmentStorage, ObjectMissing, StorageError
 
 
@@ -58,6 +59,25 @@ def has_managed_object(attachment: ActivityAttachment) -> bool:
         attachment.size_bytes is not None
         and attachment.storage_key == attachment_object_key(attachment.revision_id, attachment.id)
     )
+
+
+def attachment_can_be_copied(attachment: ActivityAttachment) -> bool:
+    return (attachment.scan_passed_at is not None and has_managed_object(attachment)
+            and is_safe_filename(attachment.file_name) and attachment.file_type in DOWNLOAD_TYPES)
+
+
+def lock_new_revision_objects(db: Session, revision_id: UUID) -> None:
+    # A new revision is invisible to other transactions until its first commit.
+    key = func.hashtextextended(f"clubos:revision-objects:{revision_id}", 0)
+    db.execute(select(func.pg_advisory_xact_lock(key)))
+
+
+def _check_student_previous_download(db: Session, viewer: Account, revision: ActivityRevision) -> None:
+    if viewer.account_type != AccountType.STUDENT or revision.superseded_at is None:
+        return
+    latest = previous_publication(revision.activity_id).with_only_columns(ActivityRevision.id)
+    if db.scalar(latest) != revision.id or database_now(db) >= recovery_deadline(revision.superseded_at):
+        raise ActivityError(404, "Attachment not found.")
 
 
 def upload_attachment(
@@ -245,6 +265,8 @@ def load_activity_attachment(
             if membership is None:
                 raise ActivityError(404, "Attachment not found.")
 
+        _check_student_previous_download(db, viewer, revision)
+
         attachment = db.scalar(
             select(ActivityAttachment).where(
                 ActivityAttachment.id == attachment_id,
@@ -254,15 +276,13 @@ def load_activity_attachment(
         if attachment is None or attachment.scan_passed_at is None or not has_managed_object(attachment):
             raise ActivityError(404, "Attachment not found.")
 
-        if (
-            not is_safe_filename(attachment.file_name)
-            or attachment.file_type not in DOWNLOAD_TYPES
-        ):
+        if not attachment_can_be_copied(attachment):
             raise StorageError("Invalid attachment metadata.")
 
         # Hold a shared revision lock until we have a complete, bounded snapshot.
         # The response can then be sent without holding database or storage resources.
         content = read_verified_object(storage, attachment.storage_key, attachment.size_bytes, attachment.content_sha256)
+        _check_student_previous_download(db, viewer, revision)
         return AttachmentDownload(attachment.file_name, attachment.file_type, content)
     except ObjectMissing as exc:
         logger.warning("Attachment object missing for attachment %s", attachment_id)
@@ -306,13 +326,15 @@ def reconcile_orphaned_upload(db: Session, storage: AttachmentStorage, key: str)
         return False
 
     try:
-        db.scalar(
+        revision_id = UUID(hex=match[1])
+        existing = db.scalar(
             select(ActivityRevision.id)
-            .where(ActivityRevision.id == UUID(hex=match[1]))
+            .where(ActivityRevision.id == revision_id)
             .with_for_update()
         )
-        # This statement starts after acquiring the revision lock, so it sees
-        # any upload that committed while reconciliation was waiting.
+        if existing is None:
+            lock_new_revision_objects(db, revision_id)
+        # Read references after waiting for the upload or initial revision commit.
         referenced = db.scalar(
             select(ActivityAttachment.id).where(ActivityAttachment.storage_key == key).limit(1)
         )

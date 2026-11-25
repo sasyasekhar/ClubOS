@@ -1,4 +1,5 @@
 
+from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy import select
@@ -21,6 +22,7 @@ from app.models.enums import (
 from app.schemas.activity import ActivityDraftCreate
 from app.services.academic_year_write_guard import lock_club_for_year_write, require_completion_window_open
 from app.services.activity_drafts import ActivityError, require_active_activity_year
+from app.services.history_retention import RETENTION_PERIOD
 
 
 def response_for(revision):
@@ -32,13 +34,12 @@ def response_for(revision):
     }
 
 
-def authorized_revision(
+def authorized_student_activity(
     db: Session,
     student: Account,
     club_id: UUID,
     activity_id: UUID,
-    revision_id: UUID,
-) -> tuple[ActivityRevision, AcademicYear]:
+) -> tuple[Activity, AcademicYear]:
     if (
         student.account_type != AccountType.STUDENT
         or not student.is_active
@@ -80,6 +81,17 @@ def authorized_revision(
 
     if activity is None:
         raise ActivityError(404, "Activity not found.")
+    return activity, year
+
+
+def authorized_revision(
+    db: Session,
+    student: Account,
+    club_id: UUID,
+    activity_id: UUID,
+    revision_id: UUID,
+) -> tuple[ActivityRevision, AcademicYear]:
+    activity, year = authorized_student_activity(db, student, club_id, activity_id)
 
     revision = db.scalar(
         select(ActivityRevision)
@@ -96,6 +108,21 @@ def authorized_revision(
 
     require_active_activity_year(db, year)
     return revision, year
+
+
+def previous_publication(activity_id: UUID):
+    # Approval sets superseded_at only on the publication it replaces. The
+    # selection includes purged and expired rows so callers never fall back.
+    return select(ActivityRevision).where(
+        ActivityRevision.activity_id == activity_id,
+        ActivityRevision.status == ActivityRevisionStatus.APPROVED,
+        ActivityRevision.is_published.is_(False),
+        ActivityRevision.superseded_at.is_not(None),
+    ).order_by(ActivityRevision.superseded_at.desc(), ActivityRevision.revision_number.desc()).limit(1)
+
+
+def recovery_deadline(superseded_at: datetime) -> datetime:
+    return superseded_at.astimezone(timezone.utc) + RETENTION_PERIOD
 
 
 def edit_activity_draft(

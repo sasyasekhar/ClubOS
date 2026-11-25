@@ -21,6 +21,8 @@ from app.schemas.activity import (
     ActivityDraftResponse,
     ActivityReviewRequest,
     ActivityReviewResponse,
+    PreviousActivityVersion,
+    RestorePreviousVersionRequest,
 )
 from app.schemas.dashboard import DashboardRevisionDetail, RevisionDetailQuery
 from app.security.permissions import require_roles
@@ -32,6 +34,7 @@ from app.services.activity_drafts import (
     create_activity_draft,
 )
 from app.services.activity_replacements import create_replacement_draft
+from app.services.activity_recovery import preview_previous_version, restore_previous_version
 from app.services.activity_review import review_activity
 from app.services.activity_workflow import (
     edit_activity_draft,
@@ -46,12 +49,40 @@ router = APIRouter(
     tags=["Activities"],
 )
 
-REVISION_PATH = "/{club_id}/activities/{activity_id}/revisions/{revision_id}"
+ACTIVITY_PATH = "/{club_id}/activities/{activity_id}"
+REVISION_PATH = ACTIVITY_PATH + "/revisions/{revision_id}"
 ATTACHMENTS_PATH = REVISION_PATH + "/attachments"
 PRIVATE_DOWNLOAD_HEADERS = {
     "Cache-Control": "private, no-store",
     "X-Content-Type-Options": "nosniff",
 }
+
+
+@router.get(ACTIVITY_PATH + "/previous-version")
+def get_previous_version(
+    club_id: UUID, activity_id: UUID, response: Response,
+    student: Account = Depends(require_roles(AccountType.STUDENT)), db: Session = Depends(get_db),
+) -> PreviousActivityVersion:
+    response.headers.update(PRIVATE_DOWNLOAD_HEADERS)
+    try:
+        return preview_previous_version(db, student, club_id, activity_id)
+    except ActivityError as exc:
+        raise HTTPException(exc.status_code, exc.detail, headers=PRIVATE_DOWNLOAD_HEADERS) from exc
+
+
+@router.post(ACTIVITY_PATH + "/restore-previous-version", status_code=status.HTTP_201_CREATED,
+             response_model=ActivityDraftResponse)
+def restore_previous_activity_version(
+    club_id: UUID, activity_id: UUID, payload: RestorePreviousVersionRequest, response: Response,
+    idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    student: Account = Depends(require_roles(AccountType.STUDENT)), db: Session = Depends(get_db),
+    storage: AttachmentStorage = Depends(get_attachment_storage),
+):
+    response.headers.update(PRIVATE_DOWNLOAD_HEADERS)
+    try:
+        return restore_previous_version(db, storage, student, club_id, activity_id, payload.expected_revision_id, idempotency_key)
+    except ActivityError as exc:
+        raise HTTPException(exc.status_code, exc.detail, headers=PRIVATE_DOWNLOAD_HEADERS) from exc
 
 
 @router.get(REVISION_PATH)

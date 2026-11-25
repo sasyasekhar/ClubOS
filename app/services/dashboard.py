@@ -127,7 +127,8 @@ def get_dashboard(db: Session, viewer: Account, query: DashboardQuery) -> Dashbo
                 db, viewer, limit=query.limit, after=query.applications_after,
             ),
             activity_revisions=_page(
-                db, revisions, ActivityRevision.id, DashboardRevision, query.limit, query.activities_after,
+                db, revisions.where(ActivityRevision.superseded_at.is_(None)),
+                ActivityRevision.id, DashboardRevision, query.limit, query.activities_after,
             ),
         )
 
@@ -184,7 +185,7 @@ def authorized_dashboard_revision(
     if viewer.account_type == AccountType.TEACHER:
         scope = scope.where(ActivityRevision.status != ActivityRevisionStatus.DRAFT)
     else:
-        scope = scope.where(or_(
+        scope = scope.where(ActivityRevision.superseded_at.is_(None), or_(
             ActivityRevision.status != ActivityRevisionStatus.DRAFT, AcademicYear.status == AcademicYearStatus.ACTIVE,
         ))
     row = db.execute(scope.with_for_update(read=True, of=ActivityRevision)).mappings().one_or_none()
