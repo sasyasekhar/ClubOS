@@ -1,0 +1,23 @@
+{% from "components/ui.html" import icon %}
+{% macro sidebar(school, items, home_url) %}
+  <a class="wordmark" href="{{ home_url }}">ClubOS</a>
+  {% if school %}<div class="school-label">{{ icon("school") }} <span>{{ school }}</span></div>{% endif %}
+  <nav class="sidebar-nav" aria-label="Workspace">
+    <ul>
+      {% for item in items %}
+      <li><a href="{{ item.href }}" data-nav-link{% if item.current %} aria-current="page"{% endif %}>{{ icon(item.icon) }} {{ item.label }}</a></li>
+      {% endfor %}
+    </ul>
+  </nav>
+{% endmacro %}
+
+{% macro breadcrumbs(items) %}
+<nav aria-label="Breadcrumb">
+  <ol class="breadcrumbs">
+    {% for label, href in items %}
+      {% if href %}<li><a href="{{ href }}">{{ label }}</a></li>
+      {% else %}<li aria-current="page">{{ label }}</li>{% endif %}
+    {% endfor %}
+  </ol>
+</nav>
+{% endmacro %}

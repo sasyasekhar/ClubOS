@@ -1,0 +1,19 @@
+{% from "components/ui.html" import panel %}
+{% call panel("Palette & typography", "foundations", "Modern Academia colours and type for the ClubOS workspace.") %}
+<ul class="palette" aria-label="Colour palette">
+  {% for name, code, token in [
+    ("Parchment","#F4EBDD","background"), ("Soft sand","#E8DCC5","sidebar"),
+    ("Forest green","#365747","primary"), ("Antique gold","#CBA052","accent"),
+    ("Warm cream","#FFF9EE","surface"), ("Soft sage","#E1EBDD","selection"),
+    ("Charcoal","#252C24","ink"), ("Quiet forest","#4F5A48","muted"),
+    ("Clay","#832E29","danger"), ("Ochre ink","#65490F","warning"),
+    ("Deep forest","#294B36","success")
+  ] %}
+    <li><span class="swatch swatch--{{ token }}" aria-hidden="true"></span><strong>{{ name }}</strong><span class="small muted">{{ code }}</span></li>
+  {% endfor %}
+</ul>
+<div class="type-grid">
+  <div><p class="small muted">Quicksand · headings and navigation</p><p class="type-heading">A place for every club</p></div>
+  <div><p class="small muted">Nunito Sans · body and forms</p><p>Plan activities, share updates and make time for the things you enjoy doing together.</p></div>
+</div>
+{% endcall %}

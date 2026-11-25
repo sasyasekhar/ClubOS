@@ -1,0 +1,31 @@
+{% extends "layouts/base.html" %}
+{% from "components/ui.html" import icon, profile_menu %}
+{% from "components/navigation.html" import sidebar %}
+{% block shell %}
+  <div class="workspace">
+    <aside class="side-rail" aria-label="School workspace">
+      {{ sidebar(school, navigation, home_url) }}
+    </aside>
+    <dialog class="nav-drawer" id="nav-drawer" aria-labelledby="drawer-title">
+      <div class="drawer-header">
+        <h2 id="drawer-title">Navigation</h2>
+        <button type="button" class="button button--secondary icon-button" aria-label="Close navigation" data-close-dialog autofocus>{{ icon("close") }}</button>
+      </div>
+      {{ sidebar(school, navigation, home_url) }}
+    </dialog>
+    <div class="workspace-main">
+      <header class="workspace-header">
+        <button type="button" class="button button--secondary mobile-nav" data-open-dialog="nav-drawer" aria-haspopup="dialog">{{ icon("menu") }} Menu</button>
+        {% if academic_year %}<span class="academic-year">{{ icon("calendar") }} {{ academic_year }}</span>{% endif %}
+        <div class="header-actions">
+          {% block notifications %}{% endblock %}
+          {{ profile_menu(profile, profile_options, can_sign_out) }}
+        </div>
+      </header>
+      {% block persistent_status %}{% endblock %}
+      <main id="main-content" tabindex="-1" class="workspace-content">
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+  </div>
+{% endblock %}

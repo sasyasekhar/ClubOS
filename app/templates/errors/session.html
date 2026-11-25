@@ -1,0 +1,4 @@
+{% from "components/ui.html" import state %}
+{% call state("Session expired", "Sign in again to continue.", "clock") %}
+<a class="button button--secondary" href="{{ auth_url }}">Open sign-in preview</a>
+{% endcall %}

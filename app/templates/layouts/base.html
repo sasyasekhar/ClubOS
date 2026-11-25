@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}ClubOS{% endblock %}</title>
+  <link rel="stylesheet" href="{{ request.url_for('static', path='css/clubos.css').path }}">
+  <script type="module" src="{{ request.url_for('static', path='js/core/layout.js').path }}"></script>
+  {% block scripts %}{% endblock %}
+</head>
+<body>
+  <a class="skip-link button" href="#main-content">Skip to content</a>
+  {% block shell %}{% endblock %}
+</body>
+</html>

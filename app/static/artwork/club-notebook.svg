@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="440" height="450" viewBox="0 0 440 450" fill="none">
+  <g stroke="#242420" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <!-- A book laid open -->
+    <g transform="translate(83 177) rotate(-11 120 68)">
+      <path d="M13 21C49 11 91 15 121 36c31-21 73-25 110-15v100c-39-9-78-4-110 17-33-21-69-26-108-17Z"/>
+      <path d="M13 31l-8 2v99c43-9 81-5 116 14 34-18 73-22 118-14V33l-8-2M121 36v102"/>
+      <path d="M31 47c24-4 47-1 68 10M31 61c25-3 47 0 68 10M31 76c25-4 48 1 68 10m-68 5c19-2 37 0 52 5m58-40c21-11 44-14 70-9m-70 24c21-10 45-14 70-10m-70 25c21-10 44-14 70-10m-70 24c17-9 34-12 52-12"/>
+    </g>
+    <!-- Ball with court seams -->
+    <g transform="translate(63 64) rotate(-19 43 43)">
+      <circle cx="43" cy="43" r="39"/><path d="M4 43h78M43 4v78M18 13c19 17 19 43 0 60m50-60c-19 17-19 43 0 60"/>
+    </g>
+    <!-- Laboratory flask -->
+    <g transform="translate(293 88) rotate(16 44 55)">
+      <path d="M31 9h26m-23 0v35L12 83c-6 11 1 18 10 18h44c9 0 16-7 10-18L54 44V9"/>
+      <path d="M23 65c10 1 18 8 30 6 5-1 10-3 13-5"/>
+      <circle cx="36" cy="83" r="2.5"/><circle cx="53" cy="90" r="3"/><circle cx="43" cy="57" r="2"/>
+    </g>
+    <!-- Pencil and music note -->
+    <g transform="translate(128 353) rotate(-13 56 12)">
+      <path d="M5 7h101l16 7-16 7H5a4 4 0 0 1-4-4v-6a4 4 0 0 1 4-4Zm13 0v14m88-14v14m-88-7h88m10-3v6"/>
+    </g>
+    <g transform="translate(307 305) rotate(10 29 35)">
+      <path d="M14 58V19l37-9v38m-37-20 37-9"/>
+      <ellipse cx="7" cy="60" rx="8" ry="5" transform="rotate(-18 7 60)"/>
+      <ellipse cx="44" cy="50" rx="8" ry="5" transform="rotate(-18 44 50)"/>
+    </g>
+    <path d="M223 83h14m-7-7v14M57 308h12m-6-6v12m322-89h14m-7-7v14m-127 167h12m-6-6v12"/>
+    <circle cx="190" cy="122" r="2"/><circle cx="380" cy="263" r="2"/><circle cx="98" cy="350" r="2"/>
+  </g>
+</svg>

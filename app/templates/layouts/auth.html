@@ -1,0 +1,15 @@
+{% extends "layouts/base.html" %}
+{% block shell %}
+<div class="auth-shell">
+  <header class="auth-header">
+    <a href="{{ return_url }}" class="wordmark">ClubOS</a>
+    {% block header_actions %}{% endblock %}
+  </header>
+  <main id="main-content" tabindex="-1" class="auth-grid">
+    <div class="auth-content">{% block content %}{% endblock %}</div>
+    <div class="auth-art" aria-hidden="true">
+      <img src="{{ request.url_for('static', path='artwork/club-notebook.svg').path }}" alt="" width="440" height="450">
+    </div>
+  </main>
+</div>
+{% endblock %}

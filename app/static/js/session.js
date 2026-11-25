@@ -1,10 +1,10 @@
+import { apiFetch } from "./core/api.js";
 
 const KEY = "clubos_tab_key";
 
 export async function signIn(identifier, password) {
-  const response = await fetch("/auth/login", {
+  const response = await apiFetch("/auth/login", {
     method: "POST",
-    credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ identifier, password })
   });
@@ -23,11 +23,7 @@ export async function authFetch(url, options = {}) {
   const headers = new Headers(options.headers);
   headers.set("X-ClubOS-Tab", key);
 
-  const response = await fetch(url, {
-    ...options,
-    headers,
-    credentials: "same-origin"
-  });
+  const response = await apiFetch(url, { ...options, headers });
 
   if (response.status === 401) {
     sessionStorage.removeItem(KEY);

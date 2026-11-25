@@ -1,0 +1,30 @@
+{% from "components/ui.html" import panel, field, button, dialog, steps, skeleton, pagination %}
+{% call panel("Impersonation", "impersonation", "School administrator view · Cedar Grove School") %}
+{{ steps("impersonation-steps", ["Find account", "Add reason", "Review", "Active"]) }}
+<div id="account-search-stage" class="flow workflow-form" data-search-url="{{ request.url_for('design_account_search').path }}">
+  {{ field("account-search", "Search by name", "search", hint="Try Alex to find multiple eligible accounts.", max_length=100) }}
+  <p id="account-search-status" class="feedback" role="status"></p>
+  <div id="account-search-results" aria-busy="false">
+    {{ skeleton("search", "Searching eligible accounts", false, true) }}
+    <ul class="account-list" id="account-list"></ul>
+  </div>
+  <button type="button" class="button button--secondary" id="account-retry" hidden>Retry search</button>
+  <div id="account-pages" hidden>{{ pagination("account-pagination", "Eligible account pages") }}</div>
+</div>
+<form id="reason-form" class="workflow-form flow" method="post" novalidate hidden>
+  <p>Selected account <strong id="selected-account"></strong></p>
+  {{ field("impersonation-reason", "Reason", "textarea", required=true, hint="Your reason is included in the impersonation audit record.", max_length=500) }}
+  <div class="actions"><button class="button button--secondary" type="button" id="change-account">Back to search</button>{{ button("Review impersonation", type="submit") }}</div>
+</form>
+<p class="feedback" id="impersonation-result" role="status"></p>
+{% call dialog("impersonation-confirm", "Confirm impersonation", "Start impersonation", cancel="Back to reason") %}
+  <dl class="review-details">
+    <dt>Account</dt><dd id="confirm-account"></dd>
+    <dt>Represented role</dt><dd id="confirm-role"></dd>
+    <dt>Reason</dt><dd id="confirm-reason"></dd>
+    <dt>Maximum duration</dt><dd>15 minutes</dd>
+  </dl>
+  <p id="confirm-access"></p>
+  <p>Actions are attributed to you, the actual administrator.</p>
+{% endcall %}
+{% endcall %}

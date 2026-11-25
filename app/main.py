@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import SQLAlchemyError
 from app.config.settings import settings
 from app.routes import (
-    academic_year_history, academic_years, activities, auth, closure_alerts, clubs, dashboard, impersonation, publications,
+    academic_year_history, academic_years, activities, auth, closure_alerts, clubs, dashboard, design, impersonation, publications,
     representative_applications,
 )
 from app.security.requests import RequestSecurityMiddleware
@@ -76,3 +76,5 @@ app.include_router(clubs.router)
 app.include_router(representative_applications.router)
 app.include_router(activities.router)
 app.include_router(publications.router)
+
+app.include_router(design.router)

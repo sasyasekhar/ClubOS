@@ -1,0 +1,23 @@
+{% from "components/ui.html" import panel, field, button, dialog, steps %}
+{% call panel("Activity review", "activity-review", "Teacher view · Campus bird count · Nature Club") %}
+{{ steps("review-steps", ["Decision", "Review", "Result"]) }}
+<form id="review-form" class="workflow-form flow" novalidate method="post">
+  {% call field("decision", "Decision", "select", required=true) %}
+  <option value="">Choose a decision</option>
+  <option value="APPROVED">Approve activity</option>
+  <option value="CHANGES_REQUESTED">Request changes</option>
+  <option value="REJECTED">Reject activity</option>
+  {% endcall %}
+  {{ field("review-comments", "Explanation", "textarea", hint="Required when requesting changes or rejecting an activity.", max_length=5000) }}
+  <fieldset><legend>Demo response</legend>
+    <label class="choice"><input type="checkbox" id="review-delay"> Simulate a lost connection after submission</label>
+  </fieldset>
+  <div class="actions">{{ button("Review decision", type="submit") }}</div>
+</form>
+<p id="review-result" class="feedback" role="status"></p>
+{% call dialog("review-confirm", "Confirm activity review", "Submit review", cancel="Back to decision") %}
+  <p><strong>Campus bird count</strong> · Nature Club</p>
+  <dl class="review-details"><dt>Decision</dt><dd id="review-decision"></dd><dt>Explanation</dt><dd id="review-explanation"></dd></dl>
+  <p id="review-consequence" class="muted"></p>
+{% endcall %}
+{% endcall %}

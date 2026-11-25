@@ -1,0 +1,111 @@
+{% macro icon(name) -%}
+<svg class="icon" width="20" height="20" aria-hidden="true" focusable="false"><use href="/static/icons/ui.svg#{{ name }}"></use></svg>
+{%- endmacro %}
+
+{% macro button(label, kind="primary", type="button", disabled=false) %}
+<button class="button button--{{ kind }}" type="{{ type }}"{% if disabled %} disabled{% endif %}>{{ label }}</button>
+{% endmacro %}
+
+{% macro field(id, label, kind="text", required=false, hint="", max_length=none, autocomplete=none, name=none) %}
+<div class="field">
+  <label for="{{ id }}">{{ label }}{% if required %} <span class="required-label">(required)</span>{% endif %}</label>
+  {% if hint %}<p id="{{ id }}-hint" class="hint">{{ hint }}</p>{% endif %}
+  {% set description = (id ~ "-hint ") if hint else "" %}
+  {% if kind == "textarea" %}
+  <textarea id="{{ id }}"{% if name %} name="{{ name }}"{% endif %} rows="3" aria-describedby="{{ description }}{{ id }}-error"{% if required %} required{% endif %}{% if max_length %} maxlength="{{ max_length }}"{% endif %}></textarea>
+  {% elif kind == "select" %}
+  <select id="{{ id }}"{% if name %} name="{{ name }}"{% endif %} aria-describedby="{{ description }}{{ id }}-error"{% if required %} required{% endif %}>{{ caller() }}</select>
+  {% else %}
+  <input id="{{ id }}"{% if name %} name="{{ name }}"{% endif %} type="{{ kind }}" aria-describedby="{{ description }}{{ id }}-error"{% if required %} required{% endif %}{% if max_length %} maxlength="{{ max_length }}"{% endif %}{% if autocomplete %} autocomplete="{{ autocomplete }}"{% endif %}>
+  {% endif %}
+  <p id="{{ id }}-error" class="field-error" hidden></p>
+</div>
+{% endmacro %}
+
+{% macro choice(id, label, kind="checkbox", name=none, value=none, checked=false, disabled=false) %}
+<label class="choice" for="{{ id }}"><input id="{{ id }}" type="{{ kind }}"{% if name %} name="{{ name }}"{% endif %}{% if value %} value="{{ value }}"{% endif %}{% if checked %} checked{% endif %}{% if disabled %} disabled{% endif %}> {{ label }}</label>
+{% endmacro %}
+
+{% macro status(label, tone="neutral") -%}
+<span class="status-text status-text--{{ tone }}">{{ label }}</span>
+{%- endmacro %}
+
+{% macro notice(title, message, tone="neutral") %}
+<div class="notice notice--{{ tone }}">
+  {{ icon({"success":"check","warning":"info","danger":"info"}.get(tone, "info")) }}
+  <div><p class="notice-title">{{ title }}</p><p>{{ message }}</p></div>
+</div>
+{% endmacro %}
+
+{% macro panel(title, id, description="") %}
+<section class="panel flow" aria-labelledby="{{ id }}">
+  <header class="flow-tight"><h2 id="{{ id }}">{{ title }}</h2>{% if description %}<p class="muted">{{ description }}</p>{% endif %}</header>
+  {{ caller() }}
+</section>
+{% endmacro %}
+
+{% macro profile_menu(profile, options=(), can_sign_out=false) %}
+<details class="disclosure profile">
+  <summary class="button button--quiet"><span class="sr-only">Profile for</span>
+    {% if profile.avatar_url %}<img class="avatar" src="{{ profile.avatar_url }}" alt="" width="32" height="32">
+    {% else %}<span class="avatar" aria-hidden="true">{{ profile.initials }}</span>{% endif %}
+    <span class="profile-summary">{{ profile.name }}</span>{{ icon("chevron") }}
+  </summary>
+  <div class="popover">
+    <div class="profile-details">
+      <strong>{{ profile.name }}</strong><p>{{ profile.role }}</p>
+      {% if profile.school %}<p>{{ profile.school }}</p>{% endif %}
+    </div>
+    {% for label, href in options %}<a class="button button--quiet" href="{{ href }}">{{ label }}</a>{% endfor %}
+    {% if can_sign_out %}<button type="button" class="button button--secondary" data-sign-out>Sign out</button>{% endif %}
+    {% if caller is defined %}{{ caller() }}{% endif %}
+  </div>
+</details>
+{% endmacro %}
+
+{% macro dialog(id, title, confirm="", kind="primary", cancel="Cancel") %}
+<dialog class="dialog" id="{{ id }}" aria-labelledby="{{ id }}-title">
+  <div class="flow">
+    <h2 id="{{ id }}-title">{{ title }}</h2>
+    {{ caller() }}
+    <p class="feedback" role="status" data-dialog-status></p>
+    <div class="actions dialog-actions">
+      <button class="button button--secondary" type="button" data-close-dialog autofocus>{{ cancel }}</button>
+      {% if confirm %}<button class="button button--{{ kind }}" type="button" data-confirm>{{ confirm }}</button>{% endif %}
+    </div>
+  </div>
+</dialog>
+{% endmacro %}
+
+{% macro steps(id, labels) %}
+<ol class="steps" aria-label="Progress" id="{{ id }}">
+  {% for label in labels %}<li{% if loop.first %} aria-current="step"{% endif %}>{{ label }}</li>{% endfor %}
+</ol>
+{% endmacro %}
+
+{% macro pagination(id, label) %}
+<nav class="pagination" id="{{ id }}" aria-label="{{ label }}">
+  <button class="button button--secondary" type="button" data-prev disabled>{{ icon("left") }} <span>Previous</span></button>
+  <p class="small muted" role="status" data-page-label>Page 1</p>
+  <button class="button button--secondary" type="button" data-next>{{ icon("right") }} <span>Next</span></button>
+</nav>
+{% endmacro %}
+
+{% macro skeleton(kind, label, announce=true, hidden=false) %}
+<div{% if hidden %} hidden{% endif %} class="skeleton skeleton--{{ kind }}" data-skeleton="{{ kind }}"{% if announce %} role="status"{% endif %}>
+  <span class="sr-only">{{ label }}</span>
+  <div class="skeleton-content" aria-hidden="true">
+    {% for row in range(2 if kind in ("summary", "profile") else 3) %}
+    <div class="skeleton-row"><span></span><span></span><span></span></div>
+    {% endfor %}
+  </div>
+</div>
+{% endmacro %}
+
+{% macro state(title, message, icon_name="info") %}
+<div class="state flow-tight">
+  {{ icon(icon_name) }}
+  <h3>{{ title }}</h3><p>{{ message }}</p>
+  {% if caller is defined %}{{ caller() }}{% endif %}
+</div>
+{% endmacro %}

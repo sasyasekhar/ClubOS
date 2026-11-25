@@ -1,0 +1,34 @@
+{% from "components/ui.html" import panel, button, field, choice %}
+{% call panel("Form controls", "forms") %}
+<div class="form-grid">
+  {{ field("club-name", "Club name", hint="As it appears in the club directory.") }}
+  {{ field("component-search", "Search clubs", "search") }}
+  {% call field("category", "Activity category", "select") %}
+    <option value="">Choose a category</option><option>Arts</option><option>Science</option><option>Sports</option>
+  {% endcall %}
+  {{ field("preview-password", "Password", "password", autocomplete="off") }}
+  {{ field("activity-notes", "Activity notes", "textarea") }}
+  {{ field("attachment", "Attachment", "file", hint="Choose a local file to preview the control.") }}
+</div>
+<div class="form-grid">
+  <fieldset>
+    <legend>Updates</legend>
+    {{ choice("notify", "Notify club representatives", checked=true) }}
+    {{ choice("archive", "Include archived clubs", disabled=true) }}
+  </fieldset>
+  <fieldset>
+    <legend>Meeting format</legend>
+    {{ choice("in-person", "In person", "radio", "meeting-format", "in-person", checked=true) }}
+    {{ choice("online", "Online", "radio", "meeting-format", "online") }}
+  </fieldset>
+</div>
+<div class="actions">
+  <button type="button" class="button button--primary" id="show-toast">Preview notification</button>
+  <button type="button" class="button button--secondary" id="remove-demo-button" aria-haspopup="dialog">Preview confirmation</button>
+  {{ button("Unavailable action", "secondary", disabled=true) }}
+</div>
+{% endcall %}
+{% from "components/ui.html" import dialog %}
+{% call dialog("remove-demo", "Remove draft?", "Remove draft", "danger") %}
+<p><strong>Robotics build day</strong> will be removed from the sample activity table.</p>
+{% endcall %}

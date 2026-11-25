@@ -1,0 +1,63 @@
+{% extends "layouts/dashboard.html" %}
+{% from "components/ui.html" import icon, button, dialog %}
+{% from "components/navigation.html" import breadcrumbs %}
+{% set home_url = request.url_for("design_showcase").path %}
+{% set auth_url = request.url_for("design_auth_preview").path %}
+{% set school = profile.school %}
+{% set academic_year = "2026–27" %}
+{% set profile_options = [("View access examples", "#feedback")] %}
+{% set can_sign_out = true %}
+{% set navigation = [
+  {"href":home_url,"label":"Overview","icon":"grid","current":true},
+  {"href":"#forms","label":"Form controls","icon":"forms"},
+  {"href":"#activity-review","label":"Activity review","icon":"review"},
+  {"href":"#impersonation","label":"Impersonation","icon":"users"},
+  {"href":"#tables","label":"Tables","icon":"table"},
+  {"href":"#feedback","label":"Feedback","icon":"layers"},
+  {"href":auth_url,"label":"Sign-in preview","icon":"door"},
+] %}
+{% block title %}Design system · ClubOS{% endblock %}
+{% block scripts %}
+<script type="module" src="{{ request.url_for('static', path='js/pages/design.js').path }}"></script>
+{% endblock %}
+{% block notifications %}
+<details class="disclosure">
+  <summary class="button button--quiet icon-button" aria-label="Notifications">{{ icon("bell") }}</summary>
+  <div class="popover flow-tight">
+    <h2 class="component-heading">Notifications</h2>
+    <ul class="notification-list"><li><strong>Campus bird count</strong><br>Nature Club submitted a revision for teacher review.</li></ul>
+  </div>
+</details>
+{% endblock %}
+{% block persistent_status %}
+<section class="impersonation-banner" aria-label="Impersonation status" id="impersonation-banner" hidden>
+  <div class="banner-copy">
+    {{ icon("clock") }}
+    <div><p><strong data-represented-name></strong> <span data-represented-role></span></p><p class="small" data-represented-access></p></div>
+  </div>
+  <p class="banner-time"><span data-remaining role="timer"></span> remaining</p>
+  <button class="button button--secondary" type="button" data-end-impersonation>End impersonation</button>
+</section>
+<p class="sr-only" role="status" id="impersonation-announcement"></p>
+{% endblock %}
+{% block content %}
+{{ breadcrumbs([("ClubOS", home_url), ("Design system", none)]) }}
+<header class="page-heading">
+  <div class="flow-tight">
+    <h1>Design system</h1>
+    <p class="muted">A local preview of the ClubOS workspace, shared components and school workflows.</p>
+  </div>
+  <a href="{{ auth_url }}" class="button button--secondary">Sign-in preview {{ icon("right") }}</a>
+</header>
+<div class="showcase-sections">
+  {% include "components/design-foundations.html" %}
+  {% include "components/design-forms.html" %}
+  {% include "components/design-review.html" %}
+  {% include "components/design-impersonation.html" %}
+  {% include "components/design-feedback.html" %}
+</div>
+<div class="toast notice notice--success" id="showcase-toast" role="status"></div>
+{% call dialog("demo-sign-out", "Sign out", cancel="Close") %}
+<p>This preview uses a fictional profile and has no sign-in session.</p>
+{% endcall %}
+{% endblock %}

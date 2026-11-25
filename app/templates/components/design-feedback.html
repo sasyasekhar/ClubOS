@@ -1,0 +1,52 @@
+{% from "components/ui.html" import panel, status, state, notice, skeleton, pagination %}
+{% call panel("Tables & pagination", "tables") %}
+<div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable activity table">
+  <table>
+    <caption>Recent activity submissions</caption>
+    <thead><tr><th scope="col">Activity</th><th scope="col">Club</th><th scope="col">Review status</th></tr></thead>
+    <tbody>
+      {% for activity, club, label, tone in activities %}
+      <tr{% if label == "Draft" %} data-sample-draft{% endif %} data-table-page="{{ 1 + (loop.index0 // 3) }}"{% if loop.index0 >= 3 %} hidden{% endif %}>
+        <th scope="row">{{ activity }}</th><td>{{ club }}</td><td>{{ status(label, tone) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{{ pagination("table-pagination", "Activity table pages") }}
+{% endcall %}
+
+{% call panel("Feedback & recovery", "feedback") %}
+<div class="feedback-grid">
+  {{ notice("Review saved", "The activity now appears in the teacher review history.", "success") }}
+  {{ notice("Academic year closes soon", "Complete open reviews before the closing date.", "warning") }}
+  {{ notice("Attachment unavailable", "Ask the club to attach the file to a new revision.", "danger") }}
+</div>
+<div class="feedback-grid">
+  {{ state("No activities to review", "New club submissions will appear here.", "inbox") }}
+  {% include "errors/permission.html" %}
+  {% include "errors/session.html" %}
+</div>
+<div class="state flow" id="retry-preview">
+  <div data-load-error>
+    <h3>Couldn’t load the club list</h3>
+    <p>Check your connection, then try again.</p>
+  </div>
+  {{ skeleton("clubs", "Loading clubs", true, true) }}
+  <div data-load-result hidden><h3>Club list loaded</h3><p>Nature Club, Media Club and Art Club</p></div>
+  <div class="actions"><button type="button" class="button button--secondary" data-load-retry>Retry loading clubs</button></div>
+  <p class="sr-only" role="status" data-load-status></p>
+</div>
+{% endcall %}
+
+{% call panel("Loading skeletons", "loading", "Content placeholders follow the shape of the information they replace.") %}
+<div class="skeleton-grid">
+  {% for kind, label in [
+    ("summary","Dashboard summary"), ("activity","Activity list"), ("clubs","Club list"),
+    ("search","Search results"), ("table","Table"), ("profile","Profile information"),
+    ("notifications","Notifications")
+  ] %}
+  <div class="flow-tight"><h3>{{ label }}</h3>{{ skeleton(kind, "Loading " ~ label|lower, false) }}</div>
+  {% endfor %}
+</div>
+{% endcall %}

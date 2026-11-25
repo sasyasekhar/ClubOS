@@ -1,0 +1,16 @@
+{
+  "name": "clubos-frontend",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24 <25" },
+  "scripts": {
+    "build": "tailwindcss -i frontend/clubos.css -o app/static/css/clubos.css --minify",
+    "test:frontend": "playwright test"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.14.1",
+    "@playwright/test": "1.65.1",
+    "@tailwindcss/cli": "4.3.5",
+    "tailwindcss": "4.3.5"
+  }
+}

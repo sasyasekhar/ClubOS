@@ -1,0 +1,48 @@
+{% extends "layouts/auth.html" %}
+{% from "components/ui.html" import button, field, icon %}
+{% set return_url = request.url_for("design_showcase").path %}
+{% block title %}Authentication preview · ClubOS{% endblock %}
+{% block scripts %}
+<script type="module" src="{{ request.url_for('static', path='js/pages/design-auth.js').path }}"></script>
+{% endblock %}
+{% block header_actions %}
+<a class="button button--secondary" href="{{ return_url }}">{{ icon("left") }} Design system</a>
+{% endblock %}
+{% block content %}
+<section class="panel auth-panel flow" aria-labelledby="auth-heading">
+  <header class="flow-tight">
+    <h1 id="auth-heading">Sign in to ClubOS</h1>
+    <p class="muted">Layout preview. Use sample details to try the form.</p>
+  </header>
+  <form id="demo-sign-in" class="flow" method="post" novalidate>
+    {{ field("demo-username", "Username", required=true, autocomplete="off") }}
+    {{ field("demo-password", "Password", "password", required=true, autocomplete="off") }}
+    {{ button("Sign in", type="submit") }}
+    <p id="login-feedback" class="feedback" role="status"></p>
+  </form>
+  <div class="auth-alt">
+    <a class="button button--quiet" href="#registration" data-auth-view="registration">View registration layout</a>
+  </div>
+</section>
+<section class="panel auth-panel flow" id="registration" aria-labelledby="registration-heading" hidden>
+  <header class="flow-tight">
+    <h1 id="registration-heading" tabindex="-1">Join your school</h1>
+    <p class="muted">Registration layout preview.</p>
+  </header>
+  <form id="demo-registration" class="flow" method="post" novalidate>
+    {{ field("demo-school-code", "School code", required=true, autocomplete="off") }}
+    {{ field("demo-full-name", "Full name", required=true, autocomplete="off") }}
+    {{ button("Preview registration", type="submit") }}
+    <p id="registration-feedback" class="feedback" role="status"></p>
+  </form>
+  <div class="auth-alt"><a class="button button--quiet" href="#" data-auth-view="sign-in">Back to sign in</a></div>
+</section>
+<details class="auth-feedback">
+  <summary>Sign-in feedback examples</summary>
+  <dl class="flow-tight">
+    {% for label, message in feedback %}
+    <dt>{{ label }}</dt><dd{% if loop.first %} id="invalid-credentials-example"{% endif %}>{{ message }}</dd>
+    {% endfor %}
+  </dl>
+</details>
+{% endblock %}
