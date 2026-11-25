@@ -118,6 +118,8 @@ class ActivityRevision(Base):
         index=True,
     )
 
+    purge_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     content_purged_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,

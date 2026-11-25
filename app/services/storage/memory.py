@@ -15,6 +15,13 @@ class MemoryAttachmentStorage:
         with self._lock:
             self._objects[key] = content
 
+    def put_if_absent(self, key: str, content: bytes, content_type: str) -> bool:
+        with self._lock:
+            if key in self._objects:
+                return False
+            self._objects[key] = content
+            return True
+
     def get(self, key: str) -> BytesIO:
         with self._lock:
             try:
@@ -26,6 +33,8 @@ class MemoryAttachmentStorage:
         with self._lock:
             self._objects.pop(key, None)
 
-    def iter_keys(self, prefix: str) -> tuple[str, ...]:
+    def iter_keys(self, prefix: str, *, after: str | None = None) -> tuple[str, ...]:
         with self._lock:
-            return tuple(key for key in self._objects if key.startswith(prefix + "/"))
+            return tuple(sorted(
+                key for key in self._objects if key.startswith(prefix + "/") and (after is None or key > after)
+            ))

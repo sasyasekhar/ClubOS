@@ -124,27 +124,28 @@ def process_expired_closure_windows(
     if not 1 <= batch_size <= MAX_BATCH_SIZE:
         raise ValueError(f"Batch size must be between 1 and {MAX_BATCH_SIZE}.")
 
-    request = AcademicYearClosureRequest
     with db.begin():
         db.execute(text("SET LOCAL statement_timeout = '10s'"))
-        candidates = db.execute(
-            select(request.school_id, request.academic_year_id)
-            .join(AcademicYear, and_(
-                AcademicYear.id == request.academic_year_id,
-                AcademicYear.school_id == request.school_id,
-            ))
-            .where(
-                request.status == literal(ClosureRequestStatus.PENDING.value, literal_execute=True),
-                request.finalized_at.is_(None),
-                request.completion_deadline_at <= func.statement_timestamp(),
-                AcademicYear.status == AcademicYearStatus.ACTIVE,
-            )
-            .order_by(request.completion_deadline_at, request.id)
-            .limit(limit)
-        ).all()
+        candidates = db.execute(due_closure_windows(limit)).all()
 
     rejected = sum(
         finalize_expired_closure_window(db, school_id, year_id, batch_size=batch_size)
         for school_id, year_id in candidates
     )
     return len(candidates), rejected
+
+
+def due_closure_windows(limit: int):
+    request = AcademicYearClosureRequest
+    return (
+        select(request.school_id, request.academic_year_id)
+        .join(AcademicYear, and_(AcademicYear.id == request.academic_year_id, AcademicYear.school_id == request.school_id))
+        .where(
+            request.status == literal(ClosureRequestStatus.PENDING.value, literal_execute=True),
+            request.finalized_at.is_(None),
+            request.completion_deadline_at <= func.statement_timestamp(),
+            AcademicYear.status == AcademicYearStatus.ACTIVE,
+        )
+        .order_by(request.completion_deadline_at, request.id)
+        .limit(limit)
+    )

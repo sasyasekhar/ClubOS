@@ -16,6 +16,7 @@ from app.services.activity_workflow import (
     authorized_revision,
     response_for,
 )
+from app.services.operation_receipts import find_receipt, stage_receipt
 
 
 def create_corrected_draft(
@@ -48,20 +49,8 @@ def create_corrected_draft(
 
         payload = data.model_dump(mode="json")
 
-        existing = db.get(AuditLog, audit_id)
-
-        if existing is not None:
-            details = existing.details or {}
-
-            if (
-                existing.action != "ACTIVITY_CORRECTION_STARTED"
-                or existing.actor_account_id != student.id
-                or details.get("payload") != payload
-            ):
-                raise ActivityError(
-                    409, "Idempotency key conflict."
-                )
-
+        action = "ACTIVITY_CORRECTION_STARTED"
+        if find_receipt(db, audit_id, action, payload, ActivityError) is not None:
             revision = db.get(ActivityRevision, new_id)
 
             if revision is None:
@@ -102,15 +91,15 @@ def create_corrected_draft(
         audit = AuditLog(
             id=audit_id,
             actor_account_id=student.id,
-            action="ACTIVITY_CORRECTION_STARTED",
+            action=action,
             entity_type="activity_revision",
             entity_id=str(new_id),
             details={
                 "source_revision_id": str(source.id),
-                "payload": payload,
             },
         )
 
+        stage_receipt(db, audit_id, action, payload)
         db.add_all([revision, audit])
         db.commit()
 

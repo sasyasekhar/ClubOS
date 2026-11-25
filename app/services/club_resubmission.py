@@ -20,6 +20,7 @@ from app.models.enums import (
 from app.schemas.club import ClubRegistrationRequest
 from app.services.academic_year_write_guard import lock_club_for_year_write, require_completion_window_open
 from app.services.club_registration import ClubRequestError
+from app.services.operation_receipts import find_receipt, stage_receipt
 
 
 def resubmit_club(
@@ -49,19 +50,8 @@ def resubmit_club(
     )
     submitted_payload = data.model_dump(mode="json")
 
-    existing_event = db.get(AuditLog, event_id)
-
-    if existing_event is not None:
-        if (
-            existing_event.action != "CLUB_RESUBMITTED"
-            or existing_event.actor_account_id != student.id
-            or existing_event.entity_id != str(club_id)
-            or existing_event.details.get("payload") != submitted_payload
-        ):
-            raise ClubRequestError(
-                409, "Idempotency key reused with different data."
-            )
-
+    action = "CLUB_RESUBMITTED"
+    if find_receipt(db, event_id, action, submitted_payload, ClubRequestError) is not None:
         return {
             "id": club.id,
             "school_id": club.school_id,
@@ -108,16 +98,6 @@ def resubmit_club(
         ).with_for_update()
     )
 
-    previous_details = {
-        "name": club.name,
-        "description": club.description,
-        "category": club.category,
-        "teacher_account_id": (
-            str(current_teacher.account_id)
-            if current_teacher else None
-        ),
-    }
-
     try:
         require_completion_window_open(db, year, ClubRequestError)
         if (
@@ -142,16 +122,13 @@ def resubmit_club(
         club.category = data.category
         club.status = ClubStatus.PENDING
 
+        stage_receipt(db, event_id, action, submitted_payload)
         db.add(AuditLog(
             id=event_id,
             actor_account_id=student.id,
-            action="CLUB_RESUBMITTED",
+            action=action,
             entity_type="club",
             entity_id=str(club.id),
-            details={
-                "previous": previous_details,
-                "payload": submitted_payload,
-            },
         ))
 
         db.commit()

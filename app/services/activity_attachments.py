@@ -241,16 +241,7 @@ def load_activity_attachment(
 
         # Hold a shared revision lock until we have a complete, bounded snapshot.
         # The response can then be sent without holding database or storage resources.
-        expected_size = attachment.size_bytes
-        assert expected_size is not None
-        with storage.get(attachment.storage_key) as source:
-            content = _read_bounded(source, min(expected_size, MAX_FILE_SIZE) + 1)
-        if (
-            len(content) != expected_size
-            or hashlib.sha256(content).hexdigest() != attachment.content_sha256
-        ):
-            raise StorageError("Attachment content does not match metadata.")
-
+        content = read_verified_object(storage, attachment.storage_key, attachment.size_bytes, attachment.content_sha256)
         return AttachmentDownload(attachment.file_name, attachment.file_type, content)
     except ObjectMissing as exc:
         logger.warning("Attachment object missing for attachment %s", attachment_id)
@@ -260,6 +251,18 @@ def load_activity_attachment(
             "Attachment download failed for attachment %s (%s)", attachment_id, type(exc).__name__
         )
         raise ActivityError(503, "Attachment download is temporarily unavailable.") from exc
+
+
+def read_verified_object(
+    storage: AttachmentStorage, key: str, expected_size: int | None, expected_hash: str | None,
+) -> bytes:
+    if expected_size is None or not 1 <= expected_size <= MAX_FILE_SIZE or expected_hash is None:
+        raise StorageError("Attachment metadata cannot be verified.")
+    with storage.get(key) as source:
+        content = _read_bounded(source, expected_size + 1)
+    if len(content) != expected_size or hashlib.sha256(content).hexdigest() != expected_hash:
+        raise StorageError("Attachment content does not match metadata.")
+    return content
 
 
 def _read_bounded(source: BinaryIO, limit: int) -> bytes:

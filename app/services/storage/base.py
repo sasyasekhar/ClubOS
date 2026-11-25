@@ -26,6 +26,10 @@ class AttachmentStorage(Protocol):
 
 
 class AttachmentInventory(AttachmentStorage, Protocol):
-    def iter_keys(self, prefix: str) -> Iterable[str]:
-        """List existing object keys beneath a namespace."""
+    def put_if_absent(self, key: str, content: bytes, content_type: str) -> bool:
+        """Create an object atomically, keeping an existing object intact."""
+        ...
+
+    def iter_keys(self, prefix: str, *, after: str | None = None) -> Iterable[str]:
+        """List keys in lexicographic order, starting after the supplied key."""
         ...

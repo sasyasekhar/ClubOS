@@ -20,6 +20,7 @@ from app.models.enums import (
 )
 from app.services.academic_year_write_guard import lock_club_for_year_write, require_completion_window_open
 from app.services.club_registration import ClubRequestError
+from app.services.operation_receipts import find_receipt, stage_receipt
 from app.services.representative_applications import selected_representative_account_id
 
 
@@ -81,16 +82,8 @@ def end_representative(
         f"clubos:membership-end:{admin.id}:{membership_id}:{key}",
     )
 
-    existing = db.get(AuditLog, event_id)
-
-    if existing is not None:
-        if (
-            existing.action != "REPRESENTATIVE_ENDED"
-            or existing.actor_account_id != admin.id
-            or (existing.details or {}).get("reason") != reason
-        ):
-            raise ClubRequestError(409, "Idempotency key conflict.")
-
+    action = "REPRESENTATIVE_ENDED"
+    if find_receipt(db, event_id, action, reason, ClubRequestError) is not None:
         return membership_result(membership)
 
     if (
@@ -113,10 +106,11 @@ def end_representative(
         membership.status = MembershipStatus.ENDED
         membership.end_date = datetime.now(timezone.utc).date()
 
+        stage_receipt(db, event_id, action, reason)
         db.add(AuditLog(
             id=event_id,
             actor_account_id=admin.id,
-            action="REPRESENTATIVE_ENDED",
+            action=action,
             entity_type="club_membership",
             entity_id=str(membership.id),
             details={
@@ -153,13 +147,12 @@ def rejoin_representative(
         f"clubos:membership-rejoin:{admin.id}:{old.id}:{key}",
     )
 
-    existing = db.get(AuditLog, event_id)
+    action = "REPRESENTATIVE_REJOINED"
+    existing = find_receipt(db, event_id, action, None, ClubRequestError)
 
     if existing is not None:
-        new_id = UUID(existing.details["new_membership_id"])
-        membership = db.get(ClubMembership, new_id)
-
-        if membership is None:
+        membership = db.get(ClubMembership, existing.result_id) if existing.result_id else None
+        if membership is None or membership.club_id != club.id:
             raise ClubRequestError(409, "Membership unavailable.")
 
         return membership_result(membership)
@@ -229,10 +222,11 @@ def rejoin_representative(
     try:
         require_completion_window_open(db, year, ClubRequestError)
         db.add(new_membership)
+        stage_receipt(db, event_id, action, None, result_id=new_id)
         db.add(AuditLog(
             id=event_id,
             actor_account_id=admin.id,
-            action="REPRESENTATIVE_REJOINED",
+            action=action,
             entity_type="club_membership",
             entity_id=str(new_id),
             details={

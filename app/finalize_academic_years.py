@@ -3,12 +3,12 @@ import sys
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.config.database import SessionLocal
 from app.services.academic_year_closure_finalization import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_WINDOW_LIMIT,
     process_expired_closure_windows,
 )
+from app.services.maintenance import MaintenanceError, exclusive_maintenance
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -18,10 +18,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        with SessionLocal() as db:
+        with exclusive_maintenance() as db:
             windows, rejected = process_expired_closure_windows(db, limit=args.limit, batch_size=args.batch_size)
     except ValueError as exc:
         parser.error(str(exc))
+    except MaintenanceError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     except SQLAlchemyError as exc:
         print(f"Academic-year finalization failed ({type(exc).__name__}).", file=sys.stderr)
         return 1

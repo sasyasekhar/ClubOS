@@ -81,6 +81,12 @@ class LocalAttachmentStorage:
             yield directory
 
     def put(self, key: str, content: bytes, content_type: str) -> None:
+        self._write_object(key, content, replace=True)
+
+    def put_if_absent(self, key: str, content: bytes, content_type: str) -> bool:
+        return self._write_object(key, content, replace=False)
+
+    def _write_object(self, key: str, content: bytes, *, replace: bool) -> bool:
         *parts, name = _key_parts(key)
         temporary = f".upload-{uuid4().hex}.tmp"
         try:
@@ -99,11 +105,18 @@ class LocalAttachmentStorage:
                             os.fsync(fd)
                     finally:
                         os.close(fd)
-                    os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
-                except OSError:
-                    os.unlink(temporary, dir_fd=directory)
-                    raise
+                    if replace:
+                        os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+                    else:
+                        try:
+                            os.link(temporary, name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+                        except FileExistsError:
+                            return False
+                finally:
+                    with suppress(FileNotFoundError):
+                        os.unlink(temporary, dir_fd=directory)
                 os.fsync(directory)
+                return True
         except OSError as exc:
             raise StorageError("Could not store attachment object.") from exc
 
@@ -144,25 +157,29 @@ class LocalAttachmentStorage:
         except OSError as exc:
             raise StorageError("Could not delete attachment object.") from exc
 
-    def iter_keys(self, prefix: str) -> Iterator[str]:
+    def iter_keys(self, prefix: str, *, after: str | None = None) -> Iterator[str]:
         parts = _key_parts(prefix)
         try:
             with self._directory(parts) as directory:
-                yield from self._list_directory(directory, prefix)
+                yield from self._list_directory(directory, prefix, after)
         except FileNotFoundError:
             return
         except OSError as exc:
             raise StorageError("Could not list attachment objects.") from exc
 
-    def _list_directory(self, directory: int, prefix: str) -> Iterator[str]:
+    def _list_directory(self, directory: int, prefix: str, after: str | None) -> Iterator[str]:
         with os.scandir(directory) as entries:
-            for entry in entries:
-                if not _KEY_COMPONENT.fullmatch(entry.name):
-                    continue
+            ordered = sorted(
+                (entry for entry in entries if _KEY_COMPONENT.fullmatch(entry.name)),
+                key=lambda entry: entry.name + ("/" if entry.is_dir(follow_symlinks=False) else ""),
+            )
+            for entry in ordered:
                 key = f"{prefix}/{entry.name}"
                 if len(key) > 500:
                     continue
                 if entry.is_dir(follow_symlinks=False):
+                    if after is not None and key < after and not after.startswith(f"{key}/"):
+                        continue
                     try:
                         child = os.open(
                             entry.name,
@@ -173,8 +190,8 @@ class LocalAttachmentStorage:
                         continue
                     try:
                         if _is_private(os.fstat(child)):
-                            yield from self._list_directory(child, key)
+                            yield from self._list_directory(child, key, after)
                     finally:
                         os.close(child)
-                elif entry.is_file(follow_symlinks=False):
+                elif (after is None or key > after) and entry.is_file(follow_symlinks=False):
                     yield key

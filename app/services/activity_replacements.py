@@ -16,6 +16,7 @@ from app.services.activity_workflow import (
     authorized_revision,
     response_for,
 )
+from app.services.operation_receipts import find_receipt, stage_receipt
 
 
 def create_replacement_draft(
@@ -44,18 +45,8 @@ def create_replacement_draft(
         )
         payload = data.model_dump(mode="json")
 
-        existing = db.get(AuditLog, audit_id)
-        if existing is not None:
-            details = existing.details or {}
-
-            if (
-                existing.action != "ACTIVITY_REPLACEMENT_STARTED"
-                or existing.actor_account_id != student.id
-                or details.get("source_revision_id") != str(source.id)
-                or details.get("payload") != payload
-            ):
-                raise ActivityError(409, "Idempotency key conflict.")
-
+        action = "ACTIVITY_REPLACEMENT_STARTED"
+        if find_receipt(db, audit_id, action, payload, ActivityError) is not None:
             revision = db.get(ActivityRevision, new_id)
             if revision is None:
                 raise ActivityError(409, "Replacement unavailable.")
@@ -103,15 +94,15 @@ def create_replacement_draft(
         audit = AuditLog(
             id=audit_id,
             actor_account_id=student.id,
-            action="ACTIVITY_REPLACEMENT_STARTED",
+            action=action,
             entity_type="activity_revision",
             entity_id=str(new_id),
             details={
                 "source_revision_id": str(source.id),
-                "payload": payload,
             },
         )
 
+        stage_receipt(db, audit_id, action, payload)
         db.add_all([revision, audit])
         db.commit()
         return response_for(revision)

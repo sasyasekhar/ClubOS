@@ -1081,6 +1081,10 @@ def test_content_purged_at_30_days(env):
         )
     )
     assert creation_audit is not None
+    assert "payload" not in creation_audit.details
+    # Older installations still have audit snapshots that must be scrubbed.
+    creation_audit.details = {**creation_audit.details, "payload": draft_data()}
+    db.commit()
     assert "payload" in creation_audit.details
 
     assert purge_expired_superseded_content(

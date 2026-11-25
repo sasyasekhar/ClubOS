@@ -19,6 +19,7 @@ from app.models.school import School
 from app.schemas.teacher_invitation import EligibleTeacher, EligibleTeachersPage
 from app.services.academic_year_write_guard import lock_club_for_year_write, require_completion_window_open
 from app.services.club_registration import ClubRequestError
+from app.services.operation_receipts import find_receipt
 from app.services.representative_applications import selected_representative_account_id
 
 
@@ -112,22 +113,13 @@ def _invitation_response(membership: ClubMembership):
     }
 
 
-def _legacy_replacement(db: Session, event_id: UUID, student_id: UUID, teacher_id: UUID) -> ClubMembership | None:
+def _legacy_replacement(db: Session, event_id: UUID, teacher_id: UUID) -> ClubMembership | None:
     # Older replacements used random membership IDs and recorded their
     # idempotency key only in the audit event.
-    event = db.get(AuditLog, event_id)
-    if event is None:
+    receipt = find_receipt(db, event_id, "TEACHER_REPLACEMENT_REQUESTED", str(teacher_id), ClubRequestError)
+    if receipt is None:
         return None
-
-    details = event.details or {}
-    if (
-        event.action != "TEACHER_REPLACEMENT_REQUESTED"
-        or event.actor_account_id != student_id
-        or details.get("new_teacher_id") != str(teacher_id)
-    ):
-        raise ClubRequestError(409, "Idempotency key conflict.")
-
-    membership = db.get(ClubMembership, UUID(details["membership_id"]))
+    membership = db.get(ClubMembership, receipt.result_id) if receipt.result_id else None
     if membership is None:
         raise ClubRequestError(409, "Invitation unavailable.")
     return membership
@@ -174,7 +166,7 @@ def _request_teacher_invitation(
         membership_id = uuid5(NAMESPACE_URL, f"clubos:teacher-invitation:{event_id}")
         existing = db.get(ClubMembership, membership_id)
         if existing is None and not initial:
-            existing = _legacy_replacement(db, event_id, student.id, new_teacher_id)
+            existing = _legacy_replacement(db, event_id, new_teacher_id)
         if existing is not None:
             if (
                 existing.club_id != club.id

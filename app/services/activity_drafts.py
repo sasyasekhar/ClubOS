@@ -24,6 +24,7 @@ from app.models.enums import (
 
 from app.schemas.activity import ActivityDraftCreate
 from app.services.academic_year_write_guard import lock_club_for_year_write, require_completion_window_open
+from app.services.operation_receipts import find_receipt, stage_receipt
 
 
 class ActivityError(Exception):
@@ -74,20 +75,8 @@ def create_activity_draft(
 
     submitted_payload = data.model_dump(mode="json")
 
-    existing_event = db.get(AuditLog, audit_id)
-
-    if existing_event is not None:
-        details = existing_event.details or {}
-
-        if (
-            existing_event.action != "ACTIVITY_DRAFT_CREATED"
-            or existing_event.actor_account_id != student.id
-            or details.get("payload") != submitted_payload
-        ):
-            raise ActivityError(
-                409, "Idempotency key reused with different data."
-            )
-
+    action = "ACTIVITY_DRAFT_CREATED"
+    if find_receipt(db, audit_id, action, submitted_payload, ActivityError) is not None:
         return {
             "activity_id": activity_id,
             "revision_id": revision_id,
@@ -140,19 +129,19 @@ def create_activity_draft(
     audit = AuditLog(
         id=audit_id,
         actor_account_id=student.id,
-        action="ACTIVITY_DRAFT_CREATED",
+        action=action,
         entity_type="activity",
         entity_id=str(activity_id),
         details={
             "club_id": str(club_id),
             "revision_id": str(revision_id),
-            "payload": submitted_payload,
         },
     )
 
     try:
         require_active_activity_year(db, year, "An active academic year is required.")
         require_completion_window_open(db, year, ActivityError)
+        stage_receipt(db, audit_id, action, submitted_payload)
         db.add_all([activity, revision, audit])
         db.commit()
 
