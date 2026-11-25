@@ -13,33 +13,17 @@ Both endpoints require the ClubOS session cookie and `X-ClubOS-Tab` header.
 
 Upload keys are scoped to the revision. While upload authorization still holds, an identical request returns the original 201 response, and different content or a different filename with the same key receives 409. A retry after submission receives 409. Successful responses contain the attachment ID, revision ID, filename, and media type.
 
-ClubOS checks PDF, PNG, and JPEG structure without interpreting PDF objects or decoding images. Add malware scanning before production. Downloads verify size and SHA-256 against PostgreSQL before sending bytes. Absent objects return 404, and unavailable or corrupt storage returns 503. Restore a missing committed object using a verified backup under its existing key.
+ClubOS validates PDF, PNG, and JPEG structure before sending the file to the configured private scanner. A clean verdict is recorded with the file's size and SHA-256. An unsafe result returns 422. An unavailable scanner, timeout, or indeterminate result returns 503. An identical retry of a verified upload returns its existing response even while the scanner is offline.
+
+Downloads require stored scan evidence and verify the object size and SHA-256 against PostgreSQL before sending bytes. Missing and unscanned attachments return 404. Storage errors and corrupt content return 503. A verified backup can restore a missing committed object under its existing key.
+
+Set `ATTACHMENT_SCAN_SOCKET` to the absolute path to a private ClamAV Unix socket. Use a service account and a restricted socket group. Set `StreamMaxLength` and `MaxFileSize` to at least 10 MiB, size `MaxScanSize` for the formats permitted by your deployment, and enable `AlertExceedsMax` so limit failures produce a non-clean result. Update signatures with `freshclam`. Pre-existing files require verified scanning before they become eligible for download. [ClamAV configuration](https://docs.clamav.net/manual/Usage/Configuration.html) · [ClamD streaming protocol](https://docs.clamav.net/manual/Usage/ClamdProtocol.html)
 
 ## Retention and reconciliation
 
 A replacement takes over when approved. The previous revision becomes unpublished immediately and stays recoverable for 30 days. At expiry, the cleanup worker locks eligible revisions, deletes their files, and then removes attachment metadata and clears revision content. Review rows and audit relationships survive. Failed or partial deletes keep the revision eligible. A subsequent run can safely delete already absent objects. Older attachment rows without verified upload metadata are preserved for operator review and excluded from private downloads.
 
-An ambiguous database commit leaves its uploaded object in place. Inventory reconciliation acquires the upload's revision lock before checking PostgreSQL and removes only managed objects that have no metadata reference. Each upload attempt uses a fresh object key, so a later retry keeps its own object. Run these maintenance operations against the matching database and private storage environment from the repository root after applying `alembic upgrade head`.
-
-```python
-from app.config.database import SessionLocal
-from app.services.activity_attachments import OBJECT_PREFIX, reconcile_orphaned_upload
-from app.services.revision_retention import purge_expired_superseded_content
-from app.services.storage import get_attachment_storage
-
-storage = get_attachment_storage()
-with SessionLocal() as db:
-    print("Revisions purged:", purge_expired_superseded_content(db, storage=storage))
-
-with SessionLocal() as db:
-    removed = sum(
-        reconcile_orphaned_upload(db, storage, key)
-        for key in storage.iter_keys(OBJECT_PREFIX)
-    )
-    print("Unreferenced objects reconciled:", removed)
-```
-
-Cleanup and inventory reconciliation are manual at this checkpoint. If a process stops during a local write, hidden `.upload-*.tmp` files can remain before the atomic rename. Remove those staging files while attachment writers are stopped. The authorized recovery API, automatic scheduling, malware scanning, and backup and restore verification remain future work.
+An ambiguous database commit leaves its uploaded object in place. Inventory reconciliation acquires the upload's revision lock before checking PostgreSQL and removes only managed objects that have no metadata reference. Each upload attempt uses a fresh object key, so a later retry keeps its own object. Use `python -m app.maintenance` from the repository root to pair the database and private directory and process bounded batches. Hidden `.upload-*.tmp` files from interrupted local writes can be removed while upload processes are stopped. [Maintenance and restore runbook](maintenance-and-recovery.md)
 
 ## Connect Cloudflare R2 later
 

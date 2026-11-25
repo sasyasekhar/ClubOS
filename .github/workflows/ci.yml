@@ -46,38 +46,22 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
-      
-      - name: Diagnose database connection
+
+      - name: Install PostgreSQL 17 backup tools
         run: |
-          python - <<'PY'
-          import psycopg
-          from app.config.settings import settings
-
-          print("Host:", settings.DB_HOST)
-          print("Port:", settings.DB_PORT)
-          print("Database:", settings.DB_NAME)
-          print("User:", settings.DB_USER)
-          print(
-              "Password matches CI password:",
-              settings.DB_PASSWORD == "ci_test_password"
-          )
-
-          try:
-              conn = psycopg.connect(
-                  host=settings.DB_HOST,
-                  port=settings.DB_PORT,
-                  dbname=settings.DB_NAME,
-                  user=settings.DB_USER,
-                  password=settings.DB_PASSWORD,
-              )
-              print("PostgreSQL connection: SUCCESS")
-              conn.close()
-          except Exception as error:
-              print("PostgreSQL connection: FAILED")
-              print(type(error).__name__, str(error))
-              raise
-          PY
-
+          if [[ ! -x /usr/lib/postgresql/17/bin/pg_dump ]]; then
+            if ! apt-cache show postgresql-client-17 >/dev/null 2>&1 && ! grep -rqs 'apt.postgresql.org' /etc/apt/sources.list.d; then
+              . /etc/os-release
+              sudo install -d /usr/share/postgresql-common/pgdg
+              sudo curl --fail --silent --show-error https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+                -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+              printf 'deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt %s-pgdg main\n' "$VERSION_CODENAME" \
+                | sudo tee /etc/apt/sources.list.d/clubos-pgdg.list >/dev/null
+            fi
+            sudo apt-get update -q
+            sudo apt-get install -q -y --no-install-recommends postgresql-client-17
+          fi
+          printf '%s\n' /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"
 
       - name: Apply database migrations
         env:
@@ -113,6 +97,13 @@ jobs:
       - name: Run automated tests
         env:
           DB_NAME: clubos_test
+          APP_ENV: test
+          ATTACHMENT_STORAGE_DIRECTORY: ${{ runner.temp }}/clubos-private-fixtures
         run: python -m pytest -v
+
+      - name: Check schema consistency
+        env:
+          DB_NAME: clubos_test
+        run: alembic check
 
 
