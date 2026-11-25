@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from queue import Queue
 from threading import Event
@@ -8,7 +9,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, event, func, select, text
+from sqlalchemy import DateTime, delete, event, func, literal, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -52,11 +53,28 @@ VIEWED = "IMPERSONATION_PUBLICATIONS_VIEWED"
 def clean_impersonation_history(scenario):
     yield
     selection = ImpersonationSession.admin_account_id.in_(scenario.accounts.values())
+    session_ids = select(ImpersonationSession.id).where(selection)
     with SessionLocal.begin() as db:
-        db.execute(delete(AuditLog).where(AuditLog.impersonation_session_id.in_(
-            select(ImpersonationSession.id).where(selection),
-        )))
+        db.execute(delete(AuditLog).where(AuditLog.impersonation_session_id.in_(session_ids)))
+        db.execute(delete(ActivityReview).where(ActivityReview.impersonation_session_id.in_(session_ids)))
         db.execute(delete(ImpersonationSession).where(selection))
+
+
+@dataclass
+class ControlledClock:
+    now: datetime
+
+    def __call__(self):
+        return literal(self.now, type_=DateTime(timezone=True))
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    with SessionLocal() as db:
+        now = db.scalar(select(func.clock_timestamp()))
+    controlled = ControlledClock(now)
+    monkeypatch.setattr(func, "clock_timestamp", controlled)
+    return controlled
 
 
 def start(client, scenario, *, actor="admin", target="teacher", reason=REASON, key=None, headers=None):
@@ -104,6 +122,12 @@ def assert_no_auth_secrets(response, scenario):
     for forbidden in ("password", "password_hash", "token_hash", "tab_key", "auth_session_id", "@example.com"):
         assert forbidden not in response.text
     assert all(value not in response.text for pair in scenario.credentials.values() for value in pair)
+
+
+def assert_same_active_session(earlier, later):
+    earlier, later = earlier.json(), later.json()
+    assert 0 < later.pop("remaining_seconds") <= earlier.pop("remaining_seconds") <= 900
+    assert earlier == later
 
 
 @pytest.mark.parametrize("actor,status", [(None, 401), ("student", 403), ("teacher", 403), ("owner", 403), ("unassigned", 403)])
@@ -155,7 +179,7 @@ def test_start_binds_to_authenticated_tab_and_preserves_original_identity(client
 
     current = client.get(CURRENT, headers=scenario.auth("admin"))
     assert current.status_code == 200, current.text
-    assert current.json() == result.json()
+    assert_same_active_session(result, current)
     assert current.json()["active"] is True
     assert current.json()["represented_role"] == role
     assert current.json()["represented_name"] == target
@@ -217,7 +241,7 @@ def test_start_and_end_retries_are_idempotent_and_cannot_resurrect_or_end_a_late
     created = start(client, scenario, key=key)
     assert created.status_code == 201, created.text
     session_id = created.json()["impersonation_session_id"]
-    assert start(client, scenario, key=key).json() == created.json()
+    assert_same_active_session(created, start(client, scenario, key=key))
     assert start(client, scenario, key=key, target="student").status_code == 409
     assert start(client, scenario, key=key, reason="A different reason").status_code == 409
     assert start(client, scenario, target="student").status_code == 409
@@ -255,7 +279,7 @@ def test_another_tab_cannot_inherit_or_end_impersonation_by_supplying_its_id(cli
     assert end(client, scenario, session_id, actor="other_admin").status_code == 404
     assert client.get("/academic-years", headers=other_tab_headers).status_code == 200
     assert client.post("/auth/logout", headers=other_tab_headers).status_code == 204
-    assert client.get(CURRENT, headers=scenario.auth("admin")).json() == created.json()
+    assert_same_active_session(created, client.get(CURRENT, headers=scenario.auth("admin")))
 
 
 def test_read_allowlist_is_audited_and_uses_the_represented_identity(client, scenario):
@@ -444,14 +468,132 @@ def test_renewing_the_parent_session_preserves_binding_and_active_impersonation(
     assert created.status_code == 201, created.text
     with SessionLocal.begin() as db:
         parent = bound_session(db, scenario)
-        parent.expires_at = datetime.now(timezone.utc) + timedelta(seconds=30)
+        parent.expires_at = db.scalar(select(func.clock_timestamp())) + timedelta(seconds=30)
+        earlier_deadline = parent.expires_at
         parent_id = parent.id
 
     assert client.post("/auth/heartbeat", headers=scenario.auth("admin")).status_code == 200
-    assert client.get(CURRENT, headers=scenario.auth("admin")).json() == created.json()
-    assert sessions(scenario)[0].auth_session_id == parent_id
+    current = client.get(CURRENT, headers=scenario.auth("admin")).json()
+    assert current["active"] is True and current["impersonation_session_id"] == created.json()["impersonation_session_id"]
+    assert datetime.fromisoformat(current["expires_at"]) == earlier_deadline
+    session, = sessions(scenario)
+    assert session.auth_session_id == parent_id and session.expires_at == earlier_deadline
     with SessionLocal() as db:
         assert bound_session(db, scenario).expires_at > datetime.now(timezone.utc) + timedelta(hours=11)
+
+
+def test_impersonation_expires_at_the_absolute_boundary_without_extending(client, scenario, clock):
+    key = uuid4()
+    created = start(client, scenario, key=key)
+    assert created.status_code == 201, created.text
+    data = created.json()
+    session_id = UUID(data["impersonation_session_id"])
+    deadline = clock.now + timedelta(minutes=15)
+    assert datetime.fromisoformat(data["started_at"]) == clock.now
+    assert datetime.fromisoformat(data["expires_at"]) == deadline
+    assert data["remaining_seconds"] == 900
+
+    admin = scenario.auth("admin")
+    clock.now = deadline - timedelta(microseconds=1)
+    assert client.get(f"{PATH}/dashboard", headers=admin).status_code == 200
+    assert client.get(FEED, headers=admin).status_code == 200
+    retry = start(client, scenario, key=key)
+    assert_same_active_session(created, retry)
+    assert retry.json()["remaining_seconds"] == 1
+
+    clock.now = deadline
+    assert client.get(f"{PATH}/dashboard", headers=admin).status_code == 403
+    expired = client.get(CURRENT, headers=admin).json()
+    assert expired["status"] == "EXPIRED" and expired["active"] is False
+    assert expired["remaining_seconds"] == 0
+    assert datetime.fromisoformat(expired["ended_at"]) == deadline
+    assert expired["expires_at"] == data["expires_at"]
+    clock.now += timedelta(seconds=1)
+    assert client.get(FEED, headers=admin).status_code == 403
+    assert start(client, scenario, key=key).json() == expired
+    assert client.get("/auth/me", headers=admin).json()["account_type"] == "SCHOOL_ADMIN"
+    assert start(client, scenario, target="student").json()["active"] is True
+    events = audits(session_id)
+    invalidation, = [entry for entry in events if entry.action == INVALIDATED]
+    assert invalidation.details == {"reason": "IMPERSONATION_TIMEOUT"}
+    assert invalidation.occurred_at == deadline
+    assert_audit_identity(events, scenario)
+    assert [entry.action for entry in events].count("IMPERSONATION_DASHBOARD_VIEWED") == 1
+
+
+@pytest.mark.parametrize("renew_parent", [False, True])
+def test_earlier_parent_cutoff_is_preserved_even_after_renewal(client, scenario, clock, renew_parent):
+    deadline = clock.now + timedelta(minutes=5)
+    with SessionLocal.begin() as db:
+        bound_session(db, scenario).expires_at = deadline
+    created = start(client, scenario)
+    assert created.status_code == 201, created.text
+    assert datetime.fromisoformat(created.json()["expires_at"]) == deadline
+    assert created.json()["remaining_seconds"] == 300
+    admin = scenario.auth("admin")
+    if renew_parent:
+        assert client.post("/auth/heartbeat", headers=admin).status_code == 200
+        with SessionLocal() as db:
+            assert bound_session(db, scenario).expires_at > deadline
+    clock.now = deadline
+    result = client.get(FEED, headers=admin)
+    assert result.status_code == (403 if renew_parent else 401), result.text
+    record, = sessions(scenario)
+    assert record.status == ImpersonationStatus.EXPIRED
+    assert record.end_reason == "PARENT_SESSION_EXPIRED"
+    assert record.ended_at == deadline
+    assert [entry.action for entry in audits(record.id)] == [STARTED, INVALIDATED]
+    if renew_parent:
+        assert client.get("/auth/me", headers=admin).status_code == 200
+
+
+def test_first_ordinary_request_at_expiration_is_denied(client, scenario, clock):
+    created = start(client, scenario)
+    clock.now = datetime.fromisoformat(created.json()["expires_at"])
+    admin = scenario.auth("admin")
+    denied = client.get("/academic-years", headers=admin)
+    assert denied.status_code == 403 and denied.json()["detail"] == "The impersonation is no longer active."
+    assert client.get("/academic-years", headers=admin).status_code == 200
+
+
+def test_expiration_is_elapsed_time_across_a_daylight_saving_transition(client, scenario, clock, monkeypatch):
+    def new_york_connection():
+        with SessionLocal() as db:
+            db.execute(text("SET LOCAL TIME ZONE 'America/New_York'"))
+            yield db
+
+    monkeypatch.setitem(app.dependency_overrides, get_db, new_york_connection)
+    # 01:55 EDT, then the local clock turns back to 01:00 EST.
+    clock.now = datetime(2026, 11, 1, 5, 55, tzinfo=timezone.utc)
+    with SessionLocal.begin() as db:
+        bound_session(db, scenario).expires_at = clock.now + timedelta(hours=12)
+    created = start(client, scenario)
+    assert created.status_code == 201, created.text
+    deadline = clock.now + timedelta(minutes=15)
+    assert datetime.fromisoformat(created.json()["expires_at"]) == deadline
+    clock.now = deadline - timedelta(microseconds=1)
+    assert client.get(FEED, headers=scenario.auth("admin")).status_code == 200
+    clock.now = deadline
+    assert client.get(FEED, headers=scenario.auth("admin")).status_code == 403
+
+
+@pytest.mark.parametrize("actor", ["admin", "admin_tab"])
+def test_new_key_can_start_immediately_after_expiration(client, scenario, clock, actor):
+    created = start(client, scenario)
+    clock.now = datetime.fromisoformat(created.json()["expires_at"])
+    later = start(client, scenario, actor=actor, target="student")
+    assert later.status_code == 201, later.text
+    assert later.json()["impersonation_session_id"] != created.json()["impersonation_session_id"]
+    assert [entry.action for entry in audits(UUID(created.json()["impersonation_session_id"]))] == [STARTED, INVALIDATED]
+
+
+def test_invalid_start_from_another_tab_keeps_expiration_audit(client, scenario, clock):
+    created = start(client, scenario)
+    clock.now = datetime.fromisoformat(created.json()["expires_at"])
+    assert start(client, scenario, actor="admin_tab", target="other_teacher").status_code == 404
+    record, = sessions(scenario)
+    assert record.status == ImpersonationStatus.EXPIRED
+    assert [entry.action for entry in audits(record.id)] == [STARTED, INVALIDATED]
 
 
 def test_database_rejects_an_impersonation_bound_to_someone_elses_parent(scenario):
@@ -460,6 +602,7 @@ def test_database_rejects_an_impersonation_bound_to_someone_elses_parent(scenari
             admin_account_id=scenario.accounts["admin"], target_account_id=scenario.accounts["teacher"],
             school_id=scenario.schools["own"], auth_session_id=bound_session(db, scenario, "teacher").id,
             reason=REASON, status=ImpersonationStatus.ACTIVE,
+            expires_at=db.scalar(select(func.clock_timestamp())) + timedelta(minutes=10),
         ))
     assert error.value.orig.sqlstate == "23503"
 
@@ -478,7 +621,8 @@ def test_concurrent_starts_create_one_session_and_one_audit(scenario, monkeypatc
     )
     assert sorted((first.status_code, second.status_code)) == expected
     if expected == [201, 201]:
-        assert first.json() == second.json()
+        ordered = sorted((first, second), key=lambda response: response.json()["remaining_seconds"], reverse=True)
+        assert_same_active_session(*ordered)
     record, = sessions(scenario)
     assert record.status == ImpersonationStatus.ACTIVE
     assert [entry.action for entry in audits(record.id)] == [STARTED]
@@ -496,7 +640,7 @@ def test_concurrent_end_retries_record_one_transition(client, scenario, monkeypa
     assert [entry.action for entry in audits(UUID(session_id))] == [STARTED, ENDED]
 
 
-def ordered_requests(monkeypatch, first, second, *, pause_at="before_commit"):
+def ordered_requests(monkeypatch, first, second, *, pause_at="before_commit", while_waiting=None):
     first_pids, second_pids = Queue(), Queue()
     release = Event()
 
@@ -534,6 +678,8 @@ def ordered_requests(monkeypatch, first, second, *, pause_at="before_commit"):
                         assert not second_request.done(), "The second request bypassed the first request's lock."
                         assert monotonic() < deadline, "The second request did not wait for the first request's lock."
                         sleep(0.01)
+                if while_waiting is not None:
+                    while_waiting()
         finally:
             release.set()
 
@@ -545,6 +691,20 @@ def ordered_requests(monkeypatch, first, second, *, pause_at="before_commit"):
             "AND pid <> pg_backend_pid() AND xact_start IS NOT NULL"
         ), {"pids": [first_pid, second_pid]}).all()
     return results
+
+
+def test_ordinary_request_waiting_during_expiration_keeps_the_old_scope(client, scenario, clock, monkeypatch):
+    created = start(client, scenario)
+    clock.now = datetime.fromisoformat(created.json()["expires_at"])
+    admin = scenario.auth("admin")
+    expired, denied = ordered_requests(
+        monkeypatch,
+        lambda c: c.get(FEED, headers=admin),
+        lambda c: c.get("/academic-years", headers=admin),
+    )
+    assert expired.status_code == denied.status_code == 403
+    assert client.get("/academic-years", headers=admin).status_code == 200
+    assert [entry.action for entry in audits(UUID(created.json()["impersonation_session_id"]))] == [STARTED, INVALIDATED]
 
 
 def test_logout_after_renewal_commit_prevents_allowlisted_read(client, scenario, monkeypatch):

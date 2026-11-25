@@ -157,12 +157,13 @@ def _export_queries(db: Session, school_id: UUID, year_id: UUID) -> Iterator[tup
     )
     yield (
         "activity_reviews.csv",
-        "Activity review decisions and decision timestamps by revision.",
+        "Activity review decisions, timestamps, and direct or impersonated provenance by revision.",
         select(
             ActivityReview.id.label("review_id"),
             ActivityReview.revision_id,
             ActivityReview.decision,
             ActivityReview.reviewed_at,
+            ActivityReview.review_mode,
         )
         .join(revisions, revisions.c.revision_id == ActivityReview.revision_id)
         .join(Account, Account.id == func.coalesce(

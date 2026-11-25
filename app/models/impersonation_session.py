@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime
 
 from sqlalchemy import (
     Index,
@@ -46,6 +47,11 @@ class ImpersonationSession(Base):
         CheckConstraint(
             "(auth_session_id IS NULL) = (school_id IS NULL) AND (status <> 'ACTIVE' OR auth_session_id IS NOT NULL)",
             name="ck_impersonation_parent_binding",
+        ),
+        CheckConstraint(
+            "(auth_session_id IS NULL) = (expires_at IS NULL) "
+            "AND (expires_at IS NULL OR expires_at <= started_at + interval '15 minutes')",
+            name="ck_impersonation_expiration",
         ),
         CheckConstraint(
             """auth_session_id IS NULL OR (
@@ -96,13 +102,15 @@ class ImpersonationSession(Base):
         nullable=False,
     )
 
-    started_at: Mapped[DateTime] = mapped_column(
+    started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
         nullable=False,
     )
 
-    ended_at: Mapped[DateTime | None] = mapped_column(
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    ended_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
     )

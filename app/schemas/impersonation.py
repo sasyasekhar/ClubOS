@@ -5,6 +5,7 @@ from uuid import UUID
 from pydantic import AfterValidator, BaseModel, ConfigDict, StringConstraints
 
 from app.models.enums import AccountType, ImpersonationStatus
+from app.schemas.activity import ActivityReviewRequest
 
 
 def _validate_text(value: str) -> str:
@@ -43,6 +44,12 @@ class EndImpersonationRequest(BaseModel):
     reason: Reason | None = None
 
 
+class ImpersonatedActivityReviewRequest(ActivityReviewRequest):
+    model_config = ConfigDict(extra="forbid")
+
+    impersonation_session_id: UUID
+
+
 class ImpersonationState(BaseModel):
     active: bool = False
     impersonation_session_id: UUID | None = None
@@ -51,5 +58,7 @@ class ImpersonationState(BaseModel):
     represented_role: TargetRole | None = None
     reason: str | None = None
     started_at: datetime | None = None
+    expires_at: datetime | None = None
+    remaining_seconds: int = 0
     ended_at: datetime | None = None
     status: ImpersonationStatus | None = None

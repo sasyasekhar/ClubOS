@@ -49,8 +49,8 @@ COOKIE_NAME = "clubos_session"
 PRIVATE_HEADERS = {"Cache-Control": "private, no-store"}
 
 
-def _impersonation_restricted() -> HTTPException:
-    return HTTPException(403, "End impersonation before using this operation.", headers=PRIVATE_HEADERS)
+def _impersonation_restricted(detail: str = "End impersonation before using this operation.") -> HTTPException:
+    return HTTPException(403, detail, headers=PRIVATE_HEADERS)
 
 
 def _authentication_unavailable(db: Session, exc: SQLAlchemyError) -> HTTPException:
@@ -135,7 +135,7 @@ def require_account(
     except InvalidSession as exc:
         raise HTTPException(401, "Authentication required", headers=PRIVATE_HEADERS) from exc
     except ImpersonationRestricted as exc:
-        raise _impersonation_restricted() from exc
+        raise _impersonation_restricted(str(exc)) from exc
     except SQLAlchemyError as exc:
         raise _authentication_unavailable(db, exc) from exc
 
@@ -146,8 +146,20 @@ def require_auth_context(
     tab_key: str | None = Header(default=None, alias="X-ClubOS-Tab"),
 ) -> AuthenticationContext:
     """Resolve context for the explicitly allowed impersonation routes."""
+    return _resolve_auth_context(request, db, tab_key, renew=True)
+
+
+def require_impersonation_write_context(
+    request: Request,
+    db: Session = Depends(get_db),
+    tab_key: str | None = Header(default=None, alias="X-ClubOS-Tab"),
+) -> AuthenticationContext:
+    return _resolve_auth_context(request, db, tab_key, renew=False)
+
+
+def _resolve_auth_context(request: Request, db: Session, tab_key: str | None, *, renew: bool) -> AuthenticationContext:
     try:
-        return authentication_context(db, request.cookies.get(COOKIE_NAME), tab_key, lock_admin=True)
+        return authentication_context(db, request.cookies.get(COOKIE_NAME), tab_key, lock_admin=True, renew=renew)
     except InvalidSession as exc:
         raise HTTPException(401, "Authentication required", headers=PRIVATE_HEADERS) from exc
     except SQLAlchemyError as exc:

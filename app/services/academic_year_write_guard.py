@@ -35,7 +35,9 @@ def require_completion_window_open(
         .outerjoin(AcademicYearClosureRequest, request_scope)
         .where(AcademicYear.id == year.id, AcademicYear.school_id == year.school_id)
     ).one()
-    if deadline_at is not None and (checked_at >= deadline_at or finalized_at is not None):
+    if deadline_at is not None and (
+        checked_at.astimezone(timezone.utc) >= deadline_at.astimezone(timezone.utc) or finalized_at is not None
+    ):
         raise error(409, {
             "code": COMPLETION_WINDOW_ENDED_CODE,
             "message": "The academic-year completion window has ended.",

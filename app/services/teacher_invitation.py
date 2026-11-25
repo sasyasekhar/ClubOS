@@ -34,10 +34,10 @@ def check_teacher(teacher: Account):
         raise ClubRequestError(403, "Permission denied.")
 
 
-def list_teacher_invitations(db: Session, teacher: Account):
+def list_teacher_invitations(db: Session, teacher: Account, *, limit: int | None = None, after: UUID | None = None):
     check_teacher(teacher)
 
-    rows = db.execute(
+    query = (
         select(ClubMembership, Club)
         .join(Club, ClubMembership.club_id == Club.id)
         .where(
@@ -50,7 +50,12 @@ def list_teacher_invitations(db: Session, teacher: Account):
                 ClubStatus.ARCHIVED,
             ]),
         )
-    ).all()
+    )
+    if after is not None:
+        query = query.where(ClubMembership.id > after)
+    if limit is not None:
+        query = query.order_by(ClubMembership.id).limit(limit)
+    rows = db.execute(query).all()
 
     return [
         {

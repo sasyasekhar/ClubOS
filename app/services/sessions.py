@@ -19,6 +19,7 @@ from app.models.school_admin import SchoolAdmin
 
 
 IDLE_TIMEOUT = timedelta(hours=12)
+IMPERSONATION_MAX_DURATION = timedelta(minutes=15)
 
 
 class InvalidSession(Exception):
@@ -26,7 +27,8 @@ class InvalidSession(Exception):
 
 
 class ImpersonationRestricted(Exception):
-    pass
+    def __init__(self, detail: str = "End impersonation before using this operation."):
+        super().__init__(detail)
 
 
 @dataclass(frozen=True)
@@ -43,8 +45,8 @@ class AuthenticationContext:
         return self.impersonation_session_id is not None
 
 
-def utcnow():
-    return datetime.now(timezone.utc)
+def database_now(db: Session) -> datetime:
+    return db.execute(select(func.clock_timestamp())).scalar_one().astimezone(timezone.utc)
 
 
 def token_hash(cookie_token, tab_key):
@@ -67,7 +69,7 @@ def create_session(db: Session, account: Account, identifier: str):
     db.add(AuthSession(
         account_id=account.id,
         token_hash=token_hash(cookie_token, tab_key),
-        expires_at=utcnow() + IDLE_TIMEOUT,
+        expires_at=database_now(db) + IDLE_TIMEOUT,
     ))
 
     db.add(LoginHistory(
@@ -103,6 +105,18 @@ def _bound_impersonation(db: Session, parent: AuthSession, *, lock: bool = False
     return db.scalar(query.execution_options(populate_existing=True))
 
 
+def _observed_impersonation_id(db: Session, cookie_token: str | None, tab_key: str | None) -> UUID | None:
+    if not cookie_token or not tab_key:
+        return None
+    # Observe the tab before waiting for its parent lock. A concurrent terminal
+    # transition must not turn an in-flight impersonated request into a direct one.
+    return db.scalar(
+        select(ImpersonationSession.id)
+        .join(AuthSession, AuthSession.id == ImpersonationSession.auth_session_id)
+        .where(AuthSession.token_hash == token_hash(cookie_token, tab_key), ImpersonationSession.status == ImpersonationStatus.ACTIVE)
+    )
+
+
 def _lock_actual_account(db: Session, account_id: UUID) -> Account | None:
     # NO KEY UPDATE serializes this administrator's tabs while remaining
     # compatible with foreign-key checks by ordinary business operations.
@@ -112,12 +126,31 @@ def _lock_actual_account(db: Session, account_id: UUID) -> Account | None:
     )
 
 
-def _parent_invalidation_reason(parent: AuthSession | None) -> str | None:
+def _parent_invalidation_reason(parent: AuthSession | None, checked_at: datetime) -> str | None:
     if parent is None or parent.revoked_at is not None:
         return "PARENT_SESSION_REVOKED"
-    if parent.expires_at <= utcnow():
+    if parent.expires_at.astimezone(timezone.utc) <= checked_at:
         return "PARENT_SESSION_EXPIRED"
     return None
+
+
+def impersonation_deadline(impersonation: ImpersonationSession, parent: AuthSession) -> datetime:
+    assert impersonation.expires_at is not None
+    return min(impersonation.expires_at.astimezone(timezone.utc), parent.expires_at.astimezone(timezone.utc))
+
+
+def impersonation_time_invalidation_reason(
+    impersonation: ImpersonationSession, parent: AuthSession | None, checked_at: datetime,
+) -> str | None:
+    if parent is None or parent.revoked_at is not None:
+        return "PARENT_SESSION_REVOKED"
+    deadline = impersonation_deadline(impersonation, parent)
+    if checked_at.astimezone(timezone.utc) < deadline:
+        return None
+    maximum_deadline = impersonation.started_at.astimezone(timezone.utc) + IMPERSONATION_MAX_DURATION
+    if deadline == parent.expires_at.astimezone(timezone.utc) or deadline < maximum_deadline:
+        return "PARENT_SESSION_EXPIRED"
+    return "IMPERSONATION_TIMEOUT"
 
 
 def _account_can_authenticate(db: Session, account: Account | None) -> bool:
@@ -151,39 +184,43 @@ def eligible_impersonation_target(db: Session, school_id: UUID, target_account_i
 
 def _validate_impersonation(
     db: Session, impersonation: ImpersonationSession, admin: Account | None, parent: AuthSession | None,
-) -> tuple[str | None, UUID | None, Account | None]:
-    reason = _parent_invalidation_reason(parent)
+) -> tuple[str | None, UUID | None, Account | None, datetime]:
+    checked_at = database_now(db)
+    reason = impersonation_time_invalidation_reason(impersonation, parent, checked_at)
     if reason is not None:
-        return reason, None, None
+        return reason, None, None, checked_at
     if parent.id != impersonation.auth_session_id or parent.account_id != impersonation.admin_account_id:
-        return "PARENT_SESSION_REVOKED", None, None
+        return "PARENT_SESSION_REVOKED", None, None, checked_at
 
     school_id = _lock_admin_school(db, admin)
     if school_id is None or school_id != impersonation.school_id:
-        return "ADMIN_AUTHORIZATION_LOST", school_id, None
+        return "ADMIN_AUTHORIZATION_LOST", school_id, None, database_now(db)
 
     target = eligible_impersonation_target(db, school_id, impersonation.target_account_id)
+    checked_at = database_now(db)
     if target is None:
-        return "TARGET_NO_LONGER_ELIGIBLE", school_id, None
-    # A live parent can reach its deadline while a school/account lock waits.
-    return _parent_invalidation_reason(parent), school_id, target
+        return "TARGET_NO_LONGER_ELIGIBLE", school_id, None, checked_at
+    # Either cutoff can pass while the school or target row is locked elsewhere.
+    reason = impersonation_time_invalidation_reason(impersonation, parent, checked_at)
+    return reason, school_id, target, checked_at
 
 
 def impersonation_invalidation_reason(
     db: Session, impersonation: ImpersonationSession, actual_account: Account, parent_session: AuthSession | None,
 ) -> str | None:
-    reason, _, _ = _validate_impersonation(db, impersonation, actual_account, parent_session)
+    reason, _, _, _ = _validate_impersonation(db, impersonation, actual_account, parent_session)
     return reason
 
 
 def finish_impersonation(
     db: Session, impersonation: ImpersonationSession, *, status: ImpersonationStatus, reason: str,
+    ended_at: datetime | None = None,
 ) -> None:
     """Stage a transition and audit while the caller holds the impersonation row lock."""
     if impersonation.status != ImpersonationStatus.ACTIVE:
         return
 
-    ended_at = db.scalar(select(func.clock_timestamp()))
+    ended_at = ended_at if ended_at is not None else database_now(db)
     impersonation.status = status
     impersonation.ended_at = ended_at
     impersonation.end_reason = reason
@@ -199,13 +236,42 @@ def finish_impersonation(
     ))
 
 
+def expire_impersonation(
+    db: Session, impersonation: ImpersonationSession, parent: AuthSession | None, reason: str,
+    *, checked_at: datetime | None = None,
+) -> None:
+    if parent is not None:
+        impersonation.expires_at = impersonation_deadline(impersonation, parent)
+    finish_impersonation(db, impersonation, status=ImpersonationStatus.EXPIRED, reason=reason, ended_at=checked_at)
+
+
+def check_impersonation_deadline(
+    db: Session, context: AuthenticationContext, checked_at: datetime | None = None,
+) -> datetime:
+    """Recheck time under the authentication locks after waiting on business rows."""
+    assert context.is_impersonating and not context.impersonation_invalidated
+    impersonation = db.get(ImpersonationSession, context.impersonation_session_id)
+    parent = db.get(AuthSession, context.auth_session_id)
+    assert impersonation is not None and impersonation.status == ImpersonationStatus.ACTIVE
+    checked_at = checked_at if checked_at is not None else database_now(db)
+    reason = impersonation_time_invalidation_reason(impersonation, parent, checked_at)
+    if reason is not None:
+        # Callers reach this check before staging any business change or read audit.
+        expire_impersonation(db, impersonation, parent, reason, checked_at=checked_at)
+        db.commit()
+        raise ImpersonationRestricted("The impersonation is no longer active.")
+    return checked_at
+
+
 def _expire_bound_impersonation(db: Session, parent: AuthSession, reason: str) -> None:
     if _bound_impersonation(db, parent) is None:
         return
     _lock_actual_account(db, parent.account_id)
     impersonation = _bound_impersonation(db, parent, lock=True)
     if impersonation is not None:
-        finish_impersonation(db, impersonation, status=ImpersonationStatus.EXPIRED, reason=reason)
+        checked_at = database_now(db)
+        reason = impersonation_time_invalidation_reason(impersonation, parent, checked_at) or reason
+        expire_impersonation(db, impersonation, parent, reason, checked_at=checked_at)
         db.commit()
 
 
@@ -213,7 +279,7 @@ def find_session(db: Session, cookie_token: str | None, tab_key: str | None) -> 
     auth_session = _lock_parent_session(db, cookie_token, tab_key)
     if auth_session is None:
         raise InvalidSession()
-    reason = _parent_invalidation_reason(auth_session)
+    reason = _parent_invalidation_reason(auth_session, database_now(db))
     if reason is not None:
         _expire_bound_impersonation(db, auth_session, reason)
         raise InvalidSession()
@@ -225,67 +291,69 @@ def authentication_context(
 ) -> AuthenticationContext:
     if lock_admin:
         db.execute(text("SET LOCAL statement_timeout = '10s'"))
+    observed_impersonation_id = _observed_impersonation_id(db, cookie_token, tab_key)
     parent = find_session(db, cookie_token, tab_key)
     account = db.get(Account, parent.account_id, populate_existing=True)
     if not _account_can_authenticate(db, account):
         _expire_bound_impersonation(db, parent, "ADMIN_AUTHORIZATION_LOST")
         raise InvalidSession()
 
-    reason = _parent_invalidation_reason(parent)
+    impersonation = _bound_impersonation(db, parent)
+    now = database_now(db)
+    renew_at = parent.expires_at.astimezone(timezone.utc) - IDLE_TIMEOUT + timedelta(minutes=2)
+    school_id = None
+    target = account
+    if impersonation is not None or (
+        account.account_type == AccountType.SCHOOL_ADMIN and (lock_admin or (renew and now > renew_at))
+    ):
+        # Serialize lifecycle operations and ordinary renewal across the admin's tabs.
+        account = _lock_actual_account(db, parent.account_id)
+        impersonation = _bound_impersonation(db, parent, lock=True)
+        if not _account_can_authenticate(db, account):
+            _expire_bound_impersonation(db, parent, "ADMIN_AUTHORIZATION_LOST")
+            raise InvalidSession()
+        if impersonation is None:
+            school_id = _lock_admin_school(db, account) if lock_admin else None
+            target = account
+            now = database_now(db)
+        else:
+            reason, school_id, target, now = _validate_impersonation(db, impersonation, account, parent)
+            if reason is not None:
+                expire_impersonation(db, impersonation, parent, reason, checked_at=now)
+                db.commit()
+                # A request that discovers invalidation cannot use ordinary permissions.
+                context = authentication_context(db, cookie_token, tab_key, lock_admin=lock_admin, renew=False)
+                return replace(context, impersonation_invalidated=True)
+
+    reason = _parent_invalidation_reason(parent, now)
     if reason is not None:
         _expire_bound_impersonation(db, parent, reason)
         raise InvalidSession()
 
-    now = utcnow()
-    if renew and parent.expires_at < now + IDLE_TIMEOUT - timedelta(minutes=2):
-        if account.account_type == AccountType.SCHOOL_ADMIN:
-            # A competing tab checks the earlier parent's idle deadline under
-            # this lock. Serialize renewal before it can use that deadline.
-            account = _lock_actual_account(db, parent.account_id)
-            if not _account_can_authenticate(db, account):
-                _expire_bound_impersonation(db, parent, "ADMIN_AUTHORIZATION_LOST")
-                raise InvalidSession()
-            now = utcnow()
-            if parent.expires_at <= now:
-                _expire_bound_impersonation(db, parent, "PARENT_SESSION_EXPIRED")
-                raise InvalidSession()
+    impersonation_id = impersonation.id if impersonation is not None else None
+    invalidated = observed_impersonation_id is not None and observed_impersonation_id != impersonation_id
+    if renew and now > renew_at:
+        if impersonation is not None:
+            # Persist a shortened parent deadline before replacing it with a later one.
+            impersonation.expires_at = impersonation_deadline(impersonation, parent)
         parent.expires_at = now + IDLE_TIMEOUT
         db.commit()
-        # Renewal releases locks. Begin authorization again from the parent,
-        # so logout or an impersonation transition can win before admission.
-        return authentication_context(db, cookie_token, tab_key, lock_admin=lock_admin, renew=False)
+        # Reacquire the authentication locks before admitting the request.
+        context = authentication_context(db, cookie_token, tab_key, lock_admin=lock_admin, renew=False)
+        if invalidated or (impersonation_id is not None and context.impersonation_session_id != impersonation_id):
+            return replace(context, impersonation_invalidated=True)
+        return context
 
-    impersonation = _bound_impersonation(db, parent)
-    if impersonation is None and (not lock_admin or account.account_type != AccountType.SCHOOL_ADMIN):
-        if _parent_invalidation_reason(parent) is not None:
-            raise InvalidSession()
-        return AuthenticationContext(account, account, parent.id)
-
-    account = _lock_actual_account(db, parent.account_id)
-    impersonation = _bound_impersonation(db, parent, lock=True)
-    if impersonation is None:
-        if not _account_can_authenticate(db, account):
-            raise InvalidSession()
-        school_id = _lock_admin_school(db, account)
-        if _parent_invalidation_reason(parent) is not None:
-            raise InvalidSession()
-        return AuthenticationContext(account, account, parent.id, authorized_school_id=school_id)
-
-    reason, school_id, target = _validate_impersonation(db, impersonation, account, parent)
-    if reason is None:
-        return AuthenticationContext(account, target, parent.id, impersonation.id, school_id)
-
-    finish_impersonation(db, impersonation, status=ImpersonationStatus.EXPIRED, reason=reason)
-    db.commit()
-    # Retain a fail-closed marker for this request. A valid next request may
-    # use ordinary permissions again after the impersonation has ended.
-    context = authentication_context(db, cookie_token, tab_key, lock_admin=lock_admin, renew=False)
-    return replace(context, impersonation_invalidated=True)
+    return AuthenticationContext(
+        account, target, parent.id, impersonation_id, school_id, impersonation_invalidated=invalidated,
+    )
 
 
 def current_account(db: Session, cookie_token: str | None, tab_key: str | None) -> Account:
     context = authentication_context(db, cookie_token, tab_key)
-    if context.is_impersonating or context.impersonation_invalidated:
+    if context.impersonation_invalidated:
+        raise ImpersonationRestricted("The impersonation is no longer active.")
+    if context.is_impersonating:
         raise ImpersonationRestricted()
     return context.actual_account
 
@@ -302,13 +370,15 @@ def revoke_session(db: Session, cookie_token: str | None, tab_key: str | None) -
         _lock_actual_account(db, parent.account_id)
         impersonation = _bound_impersonation(db, parent, lock=True)
         if impersonation is not None:
-            reason = _parent_invalidation_reason(parent)
-            finish_impersonation(
-                db, impersonation, status=ImpersonationStatus.EXPIRED if reason else ImpersonationStatus.ENDED,
-                reason=reason or "LOGOUT",
-            )
+            now = database_now(db)
+            reason = impersonation_time_invalidation_reason(impersonation, parent, now)
+            if reason is not None:
+                expire_impersonation(db, impersonation, parent, reason, checked_at=now)
+            else:
+                impersonation.expires_at = impersonation_deadline(impersonation, parent)
+                finish_impersonation(db, impersonation, status=ImpersonationStatus.ENDED, reason="LOGOUT", ended_at=now)
 
     if parent.revoked_at is None:
-        parent.revoked_at = utcnow()
+        parent.revoked_at = database_now(db)
     db.commit()
 

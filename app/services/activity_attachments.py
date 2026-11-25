@@ -173,6 +173,22 @@ def download_attachment(
     attachment_id: UUID,
 ) -> AttachmentDownload:
     try:
+        return load_activity_attachment(db, storage, viewer, club_id, activity_id, revision_id, attachment_id)
+    finally:
+        db.rollback()
+
+
+def load_activity_attachment(
+    db: Session,
+    storage: AttachmentStorage,
+    viewer: Account,
+    club_id: UUID,
+    activity_id: UUID,
+    revision_id: UUID,
+    attachment_id: UUID,
+) -> AttachmentDownload:
+    """Read a bounded snapshot while leaving the caller's transaction open."""
+    try:
         if (
             not viewer.is_active
             or viewer.school_id is None
@@ -244,8 +260,6 @@ def download_attachment(
             "Attachment download failed for attachment %s (%s)", attachment_id, type(exc).__name__
         )
         raise ActivityError(503, "Attachment download is temporarily unavailable.") from exc
-    finally:
-        db.rollback()
 
 
 def _read_bounded(source: BinaryIO, limit: int) -> bytes:

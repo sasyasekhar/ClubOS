@@ -59,7 +59,7 @@ COLUMNS = {
         "revision_id", "activity_id", "revision_number", "title", "activity_date", "category", "status",
         "is_published", "created_at", "submitted_at", "superseded_at", "content_purged_at",
     ],
-    "activity_reviews.csv": ["review_id", "revision_id", "decision", "reviewed_at"],
+    "activity_reviews.csv": ["review_id", "revision_id", "decision", "reviewed_at", "review_mode"],
     "activity_attachments.csv": ["attachment_id", "revision_id", "file_type", "size_bytes", "uploaded_at"],
 }
 START = date(2025, 6, 1)
@@ -499,6 +499,8 @@ def test_exports_history_including_inactive_members_and_purged_revisions(client,
     assert revisions[3]["submitted_at"] == ""
     reviews = {row["revision_id"]: row["decision"] for row in rows["activity_reviews.csv"]}
     assert reviews == {row["revision_id"]: row["status"] for row in revisions[:3]}
+    provenance = {row["revision_id"]: row["review_mode"] for row in rows["activity_reviews.csv"]}
+    assert [provenance[row["revision_id"]] for row in revisions[:3]] == ["DIRECT", "DIRECT", "IMPERSONATION"]
     attachments = {row["revision_id"]: row for row in rows["activity_attachments.csv"]}
     assert attachments[revisions[1]["revision_id"]]["size_bytes"] == ""
     assert attachments[revisions[2]["revision_id"]]["size_bytes"] == "123"

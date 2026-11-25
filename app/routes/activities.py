@@ -1,9 +1,10 @@
 
 from collections.abc import AsyncGenerator
+from typing import Annotated
 from urllib.parse import quote
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from python_multipart.multipart import parse_options_header
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
@@ -21,8 +22,9 @@ from app.schemas.activity import (
     ActivityReviewRequest,
     ActivityReviewResponse,
 )
+from app.schemas.dashboard import DashboardRevisionDetail, RevisionDetailQuery
 from app.security.permissions import require_roles
-from app.services.activity_attachments import download_attachment, upload_attachment
+from app.services.activity_attachments import AttachmentDownload, download_attachment, upload_attachment
 from app.services.activity_corrections import create_corrected_draft
 from app.services.activity_drafts import (
     ActivityError,
@@ -35,6 +37,7 @@ from app.services.activity_workflow import (
     submit_activity_draft,
 )
 from app.services.attachment_policy import MAX_FILE_SIZE
+from app.services.dashboard import get_dashboard_revision
 from app.services.storage import AttachmentStorage, get_attachment_storage
 
 router = APIRouter(
@@ -42,12 +45,30 @@ router = APIRouter(
     tags=["Activities"],
 )
 
-ATTACHMENTS_PATH = "/{club_id}/activities/{activity_id}/revisions/{revision_id}/attachments"
+REVISION_PATH = "/{club_id}/activities/{activity_id}/revisions/{revision_id}"
+ATTACHMENTS_PATH = REVISION_PATH + "/attachments"
 MAX_ATTACHMENT_REQUEST_SIZE = MAX_FILE_SIZE + 64 * 1024  # Multipart framing and headers.
 PRIVATE_DOWNLOAD_HEADERS = {
     "Cache-Control": "private, no-store",
     "X-Content-Type-Options": "nosniff",
 }
+
+
+@router.get(REVISION_PATH)
+def view_activity_revision(
+    club_id: UUID,
+    activity_id: UUID,
+    revision_id: UUID,
+    query: Annotated[RevisionDetailQuery, Query()],
+    response: Response,
+    viewer: Account = Depends(require_roles(AccountType.STUDENT, AccountType.TEACHER)),
+    db: Session = Depends(get_db),
+) -> DashboardRevisionDetail:
+    response.headers["Cache-Control"] = PRIVATE_DOWNLOAD_HEADERS["Cache-Control"]
+    try:
+        return get_dashboard_revision(db, viewer, club_id, activity_id, revision_id, query)
+    except ActivityError as exc:
+        raise HTTPException(exc.status_code, exc.detail, headers=PRIVATE_DOWNLOAD_HEADERS) from exc
 
 
 @router.post(
@@ -318,6 +339,10 @@ def get_activity_attachment(
             exc.status_code, exc.detail, headers=PRIVATE_DOWNLOAD_HEADERS
         ) from exc
 
+    return attachment_download_response(attachment)
+
+
+def attachment_download_response(attachment: AttachmentDownload) -> Response:
     fallback = "".join(
         char if char.isascii() and (char.isalnum() or char in " ._-") else "_"
         for char in attachment.file_name

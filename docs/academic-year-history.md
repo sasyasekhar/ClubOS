@@ -6,6 +6,8 @@ Years progress from `ACTIVE` to `CLOSED` to `ARCHIVED`. The seven-day completion
 
 Generate and save a final ZIP through `POST /academic-years/{year_id}/export`. ClubOS records a durable receipt after successfully generating the ZIP from a snapshot that saw the year as `CLOSED`. The receipt proves generation on the server. The administrator verifies that the file was saved on their device.
 
+`activity_reviews.csv` includes `review_mode` with `DIRECT` for teacher reviews and `IMPERSONATION` for reviews recorded through an authorized impersonation.
+
 Send `POST /academic-years/{year_id}/archive` with a UUID `Idempotency-Key` header and `{"export_saved": true}`. The endpoint returns the year, the archival administrator and timestamp, and the qualifying export reference. Retrying the same operation returns the recorded result. The lock and database transition guard enforce the forward-only lifecycle. Archived years remain exportable, and existing attachment retention continues on its original schedule.
 
 ## Carry forward selected clubs
